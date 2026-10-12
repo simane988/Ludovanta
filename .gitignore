@@ -5,3 +5,6 @@ __pycache__/
 .vs/
 .idea/
 .vscode/
+
+# Product notes about the first user stay local (the repository is public)
+docs/
