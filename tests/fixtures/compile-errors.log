@@ -1,0 +1,9 @@
+[Licensing::Client] Successfully resolved entitlement details
+Refreshing native plugins compatible for Editor in 0.42 ms, found 0 plugins.
+Assets/Scripts/Player.cs(12,17): error CS0103: The name 'speed' does not exist in the current context
+Assets/Scripts/Player.cs(12,17): error CS0103: The name 'speed' does not exist in the current context
+C:\Proj\Game\Assets\Scripts\Enemy.cs(3,1): error CS1002: ; expected
+Assets/Scripts/Util.cs(5,9): warning CS0168: The variable 'e' is declared but never used
+Scripts have compiler errors.
+Aborting batchmode due to failure:
+Scripts have compiler errors.

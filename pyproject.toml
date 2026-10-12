@@ -1,0 +1,9 @@
+# Dev tooling for the platform itself.
+# The payload installed into game projects (payload/files/.ludovanta) uses only the Python 3.9+ standard library.
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["tests", "payload/files/.ludovanta"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+filterwarnings = ["error"]

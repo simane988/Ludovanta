@@ -1,0 +1,5 @@
+# Ludovanta: per-machine settings, update backups, script logs and Python caches
+/ludovanta.local.json
+/.ludovanta-backup/
+/Logs/ludovanta/
+/.ludovanta/**/__pycache__/

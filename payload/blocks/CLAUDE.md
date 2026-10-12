@@ -1,0 +1,1 @@
+@.ludovanta/AGENTS.platform.md

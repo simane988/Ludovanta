@@ -1,0 +1,4 @@
+# Ludovanta: platform files always use LF, so checkouts are identical on every OS
+/.ludovanta/** text eol=lf
+/ludovanta.json text eol=lf
+{{SKILL_EOL_RULES}}
