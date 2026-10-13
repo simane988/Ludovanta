@@ -93,6 +93,70 @@ def test_test_command_passes_filter_and_platform(project, fake_unity_env):
     assert "-nographics" not in log, "PlayMode needs graphics"
 
 
+# --- flaky tests: rerun, quarantine, repeat ------------------------------------------------------
+
+def _test_runs(project):
+    return sorted((project / "Logs/ludovanta").glob("test-editmode-*.log"))
+
+
+@pytest.fixture
+def flaky_env(fake_unity_env, tmp_path):
+    return {**fake_unity_env, "FAKE_UNITY_MODE": "tests_flaky", "FAKE_UNITY_COUNTER": str(tmp_path / "runs.txt")}
+
+
+def test_real_failure_fails_again_on_rerun(project, fake_unity_env):
+    code, out = cli(project, "test", env={**fake_unity_env, "FAKE_UNITY_MODE": "tests_fail"})
+    assert code == 1, out
+    assert out.startswith("TESTS_FAILED (EditMode)") and "1 of the failure(s) above failed again on a rerun: they are real" in out
+    runs = _test_runs(project)
+    assert len(runs) == 2
+    assert r"-testFilter Game\.Tests\.MathTests\.Subtracts$" in runs[1].read_text(encoding="utf-8")
+
+
+def test_flaky_failure_passes_on_rerun(project, flaky_env):
+    code, out = cli(project, "test", "--json", env=flaky_env)
+    assert code == 0, out
+    data = json.loads(out)
+    assert data["status"] == "TESTS_FLAKY" and data["flaky"] == ["Game.Tests.MathTests.Subtracts"]
+    assert data["failures"] == []
+    code, out = cli(project, "test", env=flaky_env)   # run 3 fails, run 4 (the rerun) passes
+    assert code == 0 and out.startswith("TESTS_FLAKY (EditMode)"), out
+    assert 'Quarantine each with [Category("Flaky")]' in out and "  Game.Tests.MathTests.Subtracts" in out
+
+
+def test_no_rerun(project, flaky_env):
+    code, out = cli(project, "test", "--no-rerun", env=flaky_env)
+    assert code == 1 and out.startswith("TESTS_FAILED"), out
+    assert len(_test_runs(project)) == 1
+
+
+def test_quarantined_failures_do_not_fail_the_run(project, fake_unity_env):
+    code, out = cli(project, "test", env={**fake_unity_env, "FAKE_UNITY_MODE": "tests_quarantine"})
+    assert code == 0, out
+    assert out.startswith("TESTS_PASSED (EditMode): 1 failed, 2 passed")
+    assert "quarantine: 2 test(s) in category 'Flaky', 1 failed this run" in out
+    assert "Game.Tests.MathTests.Subtracts - failed" in out and "  Game.Tests.TimerTests.Ticks\n" in out + "\n"
+    assert len(_test_runs(project)) == 1, "quarantined failures are not rerun"
+
+
+@pytest.mark.parametrize("mode, repeat, exit_code, expected", [
+    ("tests_flaky", "4", 1, ["TESTS_FLAKY (EditMode): 2 test(s) run 4 times", "1 flaky, 0 always failing",
+                             "- Game.Tests.MathTests.Subtracts: failed 2 of 4"]),
+    ("tests_fail", "2", 1, ["TESTS_FAILED (EditMode)", "always failing (a real failure",
+                            "- Game.Tests.MathTests.Subtracts: failed 2 of 2"]),
+    ("tests_quarantine", "3", 0, ["TESTS_STABLE (EditMode): 3 test(s) run 3 times", "failed 3 of 3 (quarantined)",
+                                  "quarantined but passed all 3 runs", "  Game.Tests.TimerTests.Ticks"]),
+    ("ok", "2", 0, ["TESTS_STABLE (EditMode): 2 test(s) run 2 times in", "0 flaky, 0 always failing"]),
+    ("compile_error", "3", 1, ["COMPILE_FAILED: tests did not run"]),
+])
+def test_repeat(project, flaky_env, mode, repeat, exit_code, expected):
+    code, out = cli(project, "test", "--repeat", repeat, env={**flaky_env, "FAKE_UNITY_MODE": mode})
+    assert code == exit_code, out
+    for line in expected:
+        assert line in out
+    assert len(_test_runs(project)) == (1 if mode == "compile_error" else int(repeat))
+
+
 def test_status_headless(project, fake_unity_env):
     code, out = cli(project, "status", env=fake_unity_env)
     assert code == 0, out

@@ -5,10 +5,12 @@ Managed by Ludovanta - do not edit in a game project, changes are overwritten on
 
     python3 .ludovanta/ludovanta.py status            # LIVE (Editor open) or HEADLESS, Unity found?
     python3 .ludovanta/ludovanta.py compile           # batchmode compile, compact compiler errors
-    python3 .ludovanta/ludovanta.py test [--platform EditMode|PlayMode] [--filter X] [--category Y]
+    python3 .ludovanta/ludovanta.py test [--platform EditMode|PlayMode] [--filter X] [--category Y] [--repeat N]
+    python3 .ludovanta/ludovanta.py test-audit        # brittle, slow and flaky tests, no Unity needed
     python3 .ludovanta/ludovanta.py validate-assets   # .meta / GUID consistency, no Unity needed
-    python3 .ludovanta/ludovanta.py plan [status|check|next|brief|init|add-milestone|add-task|set|fail|close]
+    python3 .ludovanta/ludovanta.py plan [status|check|next|brief|stats|init|add-milestone|add-task|set|fail|close]
     python3 .ludovanta/ludovanta.py codex run T-001 | codex image --out Art/References/x.png "description"
+    python3 .ludovanta/ludovanta.py feedback add "what gets in the way" [--doing "..."] [--severity 1|2|3] | feedback show
     python3 .ludovanta/ludovanta.py hook session-start|stop    # called by Claude Code hooks (stdin: hook JSON)
     python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 
@@ -48,8 +50,16 @@ def build_parser() -> argparse.ArgumentParser:
                    type=lambda s: {"editmode": "EditMode", "playmode": "PlayMode"}.get(s.lower(), s))
     p.add_argument("--filter", help="test name or regex (Unity -testFilter)")
     p.add_argument("--category", help="NUnit category (Unity -testCategory)")
-    p.add_argument("--timeout", type=int, default=3600, help="seconds (default 3600)")
+    p.add_argument("--timeout", type=int, default=3600, help="seconds per Unity run (default 3600)")
+    p.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="run the same tests N times with no change and report flaky ones (N Unity runs: use --filter)")
+    p.add_argument("--no-rerun", dest="rerun", action="store_false",
+                   help="do not rerun failed tests once to tell flaky tests from real failures")
     p.add_argument("--max-items", type=int, default=20)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("test-audit", help="find brittle, slow and flaky tests without running Unity")
+    p.add_argument("--max-items", type=int, default=10, help="findings shown per kind (default 10)")
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("validate-assets", help="check .meta files and GUIDs without Unity")
@@ -82,11 +92,16 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("task")
     q.add_argument("--status", choices=["todo", "in-progress", "review", "done", "blocked", "dropped"])
     q.add_argument("--agent")
+    q.add_argument("--unverified", metavar="WHY",
+                   help="go to review/done although Ludovanta has no green full test run (Editor open, sandbox): "
+                        "why, and what you checked instead; recorded in the card's log")
     q = plan.add_parser("fail", help="record a failed attempt; stops the agent after maxAttempts (default 3)")
     q.add_argument("task")
     q.add_argument("reason", help="why the attempt failed")
     q = plan.add_parser("brief", help="what a fresh session (no task) or an executor (task id) needs, in one read")
     q.add_argument("task", nargs="?")
+    q = plan.add_parser("stats", help="per agent: tasks accepted, first-try rate, failed attempts (closed plans too)")
+    q.add_argument("--json", action="store_true")
     q = plan.add_parser("close", help="archive a finished plan to plan/archive/, numbering continues")
     q.add_argument("--carry", action="store_true", help="keep unfinished tasks (and their milestones) for the next plan")
 
@@ -101,6 +116,17 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("description", help="what the image shows: subject, style, composition, palette")
     q.add_argument("--out", required=True, help="project-relative file, e.g. Art/References/hero.png")
     q.add_argument("--timeout", type=int, default=900, help="seconds (default 900)")
+    q.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("feedback", help="friction log: what gets in the user's way (skill ludovanta-feedback)")
+    fb = p.add_subparsers(dest="feedback_command", required=True)
+    q = fb.add_parser("add", help="add an entry to docs/feedback-log.md")
+    q.add_argument("problem", help="what got in the way, close to the user's words")
+    q.add_argument("--doing", default="", help="what the user was doing at that moment")
+    q.add_argument("--severity", type=int, choices=[1, 2, 3], default=2,
+                   help="1 annoying, 2 slowed the work down (default), 3 blocked it or needed outside help")
+    q = fb.add_parser("show", help="entries of the last days, most severe first")
+    q.add_argument("--days", type=int, default=7, help="how many days back (default 7, 0 = all)")
     q.add_argument("--json", action="store_true")
 
     p = sub.add_parser("hook", help="Claude Code hook entry point (installed into .claude/settings.json)")
@@ -144,7 +170,10 @@ def main(argv: list[str] | None = None) -> int:
             return commands.compile_project(root, args.timeout, args.max_items, args.warnings, args.json)
         if args.command == "test":
             return commands.run_tests(root, args.platform, args.filter, args.category, args.timeout,
-                                      args.max_items, args.json)
+                                      args.max_items, args.json, args.repeat, args.rerun)
+        if args.command == "test-audit":
+            from ludovanta_lib import testaudit
+            return testaudit.audit(root, args.max_items, args.json)
         if args.command == "validate-assets":
             return commands.validate_assets(root, args.roots, args.max_items, args.json)
         if args.command == "plan":
@@ -163,11 +192,13 @@ def main(argv: list[str] | None = None) -> int:
             if pc == "add-task":
                 return plan.add_task(root, args.title, args.milestone, args.agent, args.size, args.depends)
             if pc == "set":
-                return plan.set_task(root, args.task, args.status, args.agent)
+                return plan.set_task(root, args.task, args.status, args.agent, args.unverified)
             if pc == "fail":
                 return plan.fail_task(root, args.task, args.reason)
             if pc == "brief":
                 return plan.brief(root, args.task)
+            if pc == "stats":
+                return plan.stats(root, args.json)
             if pc == "close":
                 return plan.close(root, args.carry)
         if args.command == "codex":
@@ -175,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.codex_command == "run":
                 return codex.run_task(root, args.task, args.timeout, args.model, args.json)
             return codex.generate_image(root, args.description, args.out, args.timeout, args.json)
+        if args.command == "feedback":
+            from ludovanta_lib import feedback
+            if args.feedback_command == "add":
+                return feedback.add(root, args.problem, args.doing, args.severity)
+            return feedback.show(root, args.days, args.json)
         if args.command == "hook":
             from ludovanta_lib import hooks
             return hooks.run(root, args.event)

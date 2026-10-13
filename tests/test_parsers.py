@@ -73,3 +73,17 @@ def test_known_problems(tmp_path, log_text, expected):
 
 def test_known_problems_missing_log(tmp_path):
     assert "no log file" in parsers.known_problems(tmp_path / "nope.log")[0]
+
+
+def test_test_cases_with_inherited_categories(tmp_path):
+    xml = tmp_path / "r.xml"
+    xml.write_text('<?xml version="1.0"?><test-run total="2" passed="1" failed="1" duration="1.5">'
+                   '<test-suite name="Asm"><properties><property name="Category" value="Slow" /></properties>'
+                   '<test-suite name="Fixture"><properties><property name="Category" value="Flaky" /></properties>'
+                   '<test-case fullname="A.B" result="Failed" duration="0.25"><failure><message>no</message></failure>'
+                   '</test-case></test-suite>'
+                   '<test-case fullname="A.C" result="Passed" duration="x" /></test-suite></test-run>', encoding="utf-8")
+    r = parsers.test_results(xml, ROOT)
+    assert r["cases"] == [{"name": "A.B", "result": "Failed", "categories": ["Flaky", "Slow"], "duration": 0.25},
+                          {"name": "A.C", "result": "Passed", "categories": ["Slow"], "duration": 0.0}]
+    assert r["failures"][0]["categories"] == ["Flaky", "Slow"]

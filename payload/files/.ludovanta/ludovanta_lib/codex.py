@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import plan as plan_mod
 from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, EXIT_TIMEOUT, IS_WINDOWS, LudovantaError, finish, load_config,
-                     relpath)
+                     relpath, write_lf)
 
 SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 IMAGE_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"RIFF")
@@ -109,7 +109,7 @@ def run_task(root: Path, task_id: str, timeout: int, model: str | None, as_json:
                                                      "write them before giving the task to Codex."], {}, as_json)
     prompt, result, log = _work_files(root, task_id)
     brief = plan_mod.task_brief(root, task_id)
-    prompt.write_text("\n".join(brief).replace("<claude|codex>", "codex") + "\n", encoding="utf-8", newline="\n")
+    write_lf(prompt, "\n".join(brief).replace("<claude|codex>", "codex") + "\n")
     run = _run(root, exe, prompt, result, log, timeout, model or settings["model"], settings["sandbox"])
     data = {"task": task_id, **run, "changed": _changed_files(root)}
     if run["timedOut"]:
@@ -142,11 +142,11 @@ def generate_image(root: Path, description: str, out: str, timeout: int, as_json
     target.parent.mkdir(parents=True, exist_ok=True)
     before = target.stat().st_mtime if target.is_file() else None
     prompt, result, log = _work_files(root, "image")
-    prompt.write_text(
-        "Generate one image with your built-in image generation ($imagegen).\n\n"
-        f"Save it into this project at exactly this path: `{rel}` (create the folders if needed, overwrite the file "
-        "if it exists). Do not change any other file.\n\n"
-        f"Image description:\n\n{description.strip()}\n", encoding="utf-8", newline="\n")
+    write_lf(prompt,
+             "Generate one image with your built-in image generation ($imagegen).\n\n"
+             f"Save it into this project at exactly this path: `{rel}` (create the folders if needed, overwrite the "
+             "file if it exists). Do not change any other file.\n\n"
+             f"Image description:\n\n{description.strip()}\n")
     run = _run(root, exe, prompt, result, log, timeout, settings["model"], "workspace-write")
     data = {"image": rel, **run}
     if run["timedOut"]:

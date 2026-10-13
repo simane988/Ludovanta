@@ -20,10 +20,11 @@ def update(project, *args):
 
 def test_installs_platform_files(installed_project):
     p = installed_project
-    for rel in (".ludovanta/ludovanta.py", ".ludovanta/ludovanta_lib/commands.py", ".ludovanta/AGENTS.platform.md",
+    for rel in (".ludovanta/ludovanta.py", ".ludovanta/ludovanta_lib/commands.py", ".ludovanta/ludovanta_lib/feedback.py",
                 ".claude/skills/ludovanta-unity-compile/SKILL.md", ".claude/skills/ludovanta-platform-update/SKILL.md",
                 ".claude/skills/ludovanta-game-design/SKILL.md", ".claude/skills/ludovanta-game-design/unity-craft.md",
                 ".claude/skills/ludovanta-design-review/SKILL.md", ".claude/skills/ludovanta-codex/SKILL.md",
+                ".claude/skills/ludovanta-feedback/SKILL.md", ".agents/skills/ludovanta-plan/SKILL.md",
                 ".ludovanta/hook.sh", ".ludovanta/ludovanta_lib/hooks.py", ".ludovanta/ludovanta_lib/codex.py"):
         assert (p / rel).is_file(), rel
     assert lock(p)["version"] == VERSION
@@ -36,7 +37,8 @@ def test_keeps_user_content(installed_project):
     agents = read(p / "AGENTS.md")
     assert agents.startswith("# My game\n\nUser rules for agents.\n")
     assert ">>> ludovanta:managed" in agents and "<<< ludovanta:managed" in agents
-    assert "@.ludovanta/AGENTS.platform.md" in read(p / "CLAUDE.md")
+    assert "### Two working modes" in agents, "the platform rules are inline, so Codex loads them with AGENTS.md"
+    assert "\n@AGENTS.md\n" in read(p / "CLAUDE.md"), "Claude imports the same AGENTS.md"
 
 
 def test_preserves_crlf_in_shared_files(installed_project):
@@ -48,8 +50,12 @@ def test_preserves_crlf_in_shared_files(installed_project):
 
 def test_creates_config(installed_project):
     cfg = json.loads(read(installed_project / "ludovanta.json"))
-    assert cfg == {"source": "https://example.com/ludovanta.git", "ref": "v0.1.0", "skillTargets": [".claude/skills"]}
-    assert "/.claude/skills/ludovanta-*/** text eol=lf" in read(installed_project / ".gitattributes")
+    assert cfg == {"source": "https://example.com/ludovanta.git", "ref": "v0.1.0",
+                   "skillTargets": [".claude/skills", ".agents/skills"]}
+    attributes = read(installed_project / ".gitattributes")
+    assert "/.claude/skills/ludovanta-*/** text eol=lf" in attributes
+    assert "/.agents/skills/ludovanta-*/** text eol=lf" in attributes
+    assert "/docs/feedback-log.md merge=union" in attributes
 
 
 def test_rejects_non_unity_folder(tmp_path):
@@ -78,28 +84,28 @@ def test_dry_run_does_not_write(installed_project):
 # --- local changes -----------------------------------------------------------------------------
 
 def test_modified_platform_file_blocks_update(installed_project):
-    target = installed_project / ".ludovanta/AGENTS.platform.md"
+    target = installed_project / ".ludovanta/ludovanta_lib/plan.py"
     write(target, read(target) + "local hack\n")
     code, out = install(installed_project)
     assert code == 1, out
-    assert "AGENTS.platform.md: modified locally" in out
+    assert "plan.py: modified locally" in out
     assert "local hack" in read(target), "nothing is written on conflict"
 
 
 def test_force_backs_up_and_restores(installed_project):
-    target = installed_project / ".ludovanta/AGENTS.platform.md"
+    target = installed_project / ".ludovanta/ludovanta_lib/plan.py"
     write(target, read(target) + "local hack\n")
     code, out = install(installed_project, "--force")
     assert code == 0, out
     assert "local hack" not in read(target)
-    [backup] = (installed_project / ".ludovanta-backup").rglob("AGENTS.platform.md")
+    [backup] = (installed_project / ".ludovanta-backup").rglob("plan.py")
     assert "local hack" in read(backup)
     assert git_status(installed_project) == "", "backups are gitignored"
 
 
 def test_edited_managed_block_blocks_update(installed_project):
     agents = installed_project / "AGENTS.md"
-    write(agents, read(agents).replace("Skills named", "EDITED Skills named"))
+    write(agents, read(agents).replace("### Two working modes", "### EDITED working modes"))
     code, out = install(installed_project)
     assert code == 1, out
     assert "AGENTS.md: ludovanta:managed block edited locally" in out

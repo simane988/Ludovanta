@@ -30,7 +30,8 @@ files must not be edited. Explain this to the user and suggest moving the custom
 place the project owns:
 
 - own skills: a skill folder without the `ludovanta-` prefix;
-- own agent instructions: `AGENTS.md` / `CLAUDE.md` outside the `ludovanta:managed` block.
+- own agent instructions and preferences: `AGENTS.md` outside the `ludovanta:managed` block (Claude and
+  Codex both read it; `CLAUDE.md` is read by Claude only).
 
 Only with the user's consent re-run with `--force`: the changed files are backed up to
 `.ludovanta-backup/<timestamp>/` and replaced.

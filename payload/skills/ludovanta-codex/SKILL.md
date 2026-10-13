@@ -20,7 +20,12 @@ Good fits: size S, plain code with clear criteria, no Unity Editor or scene work
 calculator or data class with its EditMode tests, a parser, a ScriptableObject config, an editor
 utility, a refactor inside a few files, shader code to a written spec. Poor fits: scene and prefab
 wiring, anything that needs Unity MCP, judging how something looks or feels, tasks whose criteria
-are vague. Mark them in the plan with `agent: codex` (the user decides the rules).
+are vague. Mark them in the plan with `agent: codex`. The project's own split rules in `AGENTS.md`
+win over this list (skill `ludovanta-plan`, "Splitting tasks between agents").
+
+Codex reads the same rules as Claude: `AGENTS.md` with the Ludovanta block, and the `ludovanta-*`
+skills in `.agents/skills` (in `skillTargets` of `ludovanta.json`; `status` warns when it is missing).
+The same applies when the user works with Codex directly, for example in Orca.
 
 ```
 python3 .ludovanta/ludovanta.py codex run T-012 [--model <id>] [--timeout 3600] [--json]
@@ -33,7 +38,8 @@ python3 .ludovanta/ludovanta.py codex run T-012 [--model <id>] [--timeout 3600] 
 - It takes minutes: in Claude Code run it in the background and keep talking to the user.
 - One writer at a time in one folder: do not run a Claude executor and Codex in the same project
   folder at once. In parallel only in separate git worktrees.
-- Codex's sandbox may not let Unity start (licensing). Then its report says "not compiled"; you
+- Codex's sandbox may not let Unity start (licensing). Then it moves the task to review with
+  `--unverified` and its report says "not compiled"; you
   compile and run the tests (Unity MCP in LIVE mode, `compile`/`test` in HEADLESS).
 - Verify before reporting: review the diff, compile, run the tests, tick or untick the criteria.
   A failed result is `plan fail T-012 "..."`, like any other attempt. Exit codes: 0 done, 1 refused

@@ -28,6 +28,15 @@ def test_not_installed(game):
     assert out.startswith("CODEX_NOT_FOUND")
     _, out = cli(game, "status", env={"CODEX_PATH": str(game / "nope")})
     assert "codex cli: not found" in out
+    assert "codex skills" not in out
+
+
+def test_status_warns_when_codex_cannot_see_the_skills(game, fake_codex_env):
+    _, out = cli(game, "status", env=fake_codex_env)
+    assert "codex cli: " in out and "codex skills" not in out, "default skill targets include .agents/skills"
+    write(game / "ludovanta.json", json.dumps({"skillTargets": [".claude/skills"]}))
+    _, out = cli(game, "status", env=fake_codex_env)
+    assert "codex skills: Codex does not see the ludovanta-* skills" in out
 
 
 def test_run_task(game, fake_codex_env):

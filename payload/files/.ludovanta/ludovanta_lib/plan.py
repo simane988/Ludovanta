@@ -20,7 +20,8 @@ import shutil
 from datetime import date
 from pathlib import Path
 
-from .common import EXIT_OK, EXIT_PROBLEMS, LudovantaError, finish, load_config, relpath
+from . import testgate
+from .common import EXIT_OK, EXIT_PROBLEMS, LudovantaError, finish, load_config, relpath, write_lf
 
 STATUSES = ("todo", "in-progress", "review", "done", "blocked", "dropped")
 SIZES = {"S": 1, "M": 2, "L": 4}
@@ -515,7 +516,7 @@ def init(root: Path, title: str | None) -> int:
                        ("design.md", DESIGN_TEMPLATE.format(title=title or "Game"))):
         path = plan.dir / name
         if not path.exists():
-            path.write_text(text, encoding="utf-8", newline="\n")
+            write_lf(path, text)
             created.append(plan.rel(path))
     lines = [f"PLAN_INIT: {plan.rel(plan.dir)}/ ready" + (f", created {', '.join(created)}" if created else
                                                            " (already existed, nothing overwritten)")]
@@ -528,7 +529,7 @@ def add_milestone(root: Path, title: str) -> int:
     folder.mkdir(parents=True, exist_ok=True)
     mid = plan.next_id("milestones", MILESTONE_FILE_RX, "M", 1)
     path = folder / f"{mid}.md"
-    path.write_text(MILESTONE_TEMPLATE.format(id=mid, title=title), encoding="utf-8", newline="\n")
+    write_lf(path, MILESTONE_TEMPLATE.format(id=mid, title=title))
     return finish("MILESTONE_ADDED", EXIT_OK, [f"MILESTONE_ADDED: {mid} -> {plan.rel(path)}"])
 
 
@@ -546,13 +547,14 @@ def add_task(root: Path, title: str, milestone: str, agent: str, size: str, depe
     folder.mkdir(parents=True, exist_ok=True)
     tid = plan.next_id("tasks", TASK_FILE_RX, "T-", 3)
     path = folder / f"{tid}.md"
-    path.write_text(TASK_TEMPLATE.format(id=tid, title=title, milestone=milestone, agent=agent.lower(), size=size,
-                                         depends=", ".join(depends)), encoding="utf-8", newline="\n")
+    write_lf(path, TASK_TEMPLATE.format(id=tid, title=title, milestone=milestone, agent=agent.lower(), size=size,
+                                        depends=", ".join(depends)))
     return finish("TASK_ADDED", EXIT_OK, [f"TASK_ADDED: {tid} -> {plan.rel(path)}",
                                           "Fill in the goal and the acceptance criteria ('- [ ] ...') before starting it."])
 
 
-def set_task(root: Path, task_id: str, new_status: str | None, agent: str | None) -> int:
+def set_task(root: Path, task_id: str, new_status: str | None, agent: str | None,
+             unverified: str | None = None) -> int:
     plan = Plan(root)
     card = plan.card(task_id)
     task = plan.by_id[task_id]
@@ -563,6 +565,20 @@ def set_task(root: Path, task_id: str, new_status: str | None, agent: str | None
                 f"NO_CRITERIA: {task_id} has no acceptance criteria, it cannot be {new_status}.",
                 f"Add '- [ ] ...' lines to {task['file']} (what the user will check, observable), "
                 "agree them with the user if the task is ambiguous, then set the status again."])
+        # The test gate: finished work needs a green full test run newer than the code (review -> done was checked).
+        gate = testgate.problems(root) if new_status in ("review", "done") and task["status"] != "review" else []
+        if gate and not (unverified or "").strip():
+            return finish("TESTS_NOT_GREEN", EXIT_PROBLEMS, [
+                f"TESTS_NOT_GREEN: {task_id} cannot go to {new_status}, its status stays '{task['status']}':"]
+                + [f"  {g}" for g in gate]
+                + ["Run the tests without --filter and fix the real failures (flaky ones: quarantine them). Only if "
+                   "Ludovanta cannot run them here (Editor open, environment exit code 2, a sandbox), verify another "
+                   "way and add --unverified \"<why, and what you checked instead>\": it goes into the card's log "
+                   "and the orchestrator runs the tests."])
+        if gate:
+            card.append_log(f"- {date.today().isoformat()} {new_status} without a green test run: {unverified.strip()}")
+            lines.append("note: tests not verified by Ludovanta, recorded in the card's log; the orchestrator must "
+                         "run them before reporting to the user.")
         card.set_field("status", new_status)
         lines.append(f"TASK_UPDATED: {task_id} status {task['status']} -> {new_status}")
         open_criteria = task["criteria"] - task["criteriaChecked"]
@@ -572,6 +588,9 @@ def set_task(root: Path, task_id: str, new_status: str | None, agent: str | None
     if agent:
         card.set_field("agent", agent.lower())
         lines.append(f"TASK_UPDATED: {task_id} agent {task['agent']} -> {agent.lower()}")
+    elif new_status == "in-progress" and task["agent"] == "any":
+        lines.append(f"note: record who works on it ('plan set {task_id} --agent claude|codex'): "
+                     "'plan stats' compares the agents by it.")
     if not lines:
         raise LudovantaError("nothing to change: pass --status and/or --agent")
     card.save()
@@ -600,6 +619,75 @@ def fail_task(root: Path, task_id: str, reason: str) -> int:
         "Before the next attempt, change the approach: do not repeat what already failed."])
 
 
+# --- Agent statistics: data for the rules that split tasks between agents ---------------------------
+
+def _archived_tasks(plan: Plan) -> list[dict]:
+    tasks = []
+    for a in plan.archives():
+        folder = a / "tasks"
+        for p in sorted(folder.iterdir(), key=lambda p: _natural(p.stem)) if folder.is_dir() else []:
+            if not TASK_FILE_RX.match(p.name):
+                continue
+            card = CardFile(p)
+            if card.error:
+                continue
+            f = card.fields
+            try:
+                attempts = int(f.get("attempts") or 0)
+            except ValueError:
+                attempts = 0
+            tasks.append({"id": f.get("id", p.stem), "status": f.get("status", "todo").lower(),
+                          "agent": (f.get("agent") or "any").lower(), "size": (f.get("size") or "M").upper(),
+                          "attempts": attempts})
+    return tasks
+
+
+def agent_stats(plan: Plan) -> list[dict]:
+    """Per agent: tasks accepted by the user, how many on the first try, failed attempts, stops, sizes."""
+    tasks = _archived_tasks(plan) + plan.tasks
+    rows: dict[str, dict] = {}
+    for t in tasks:
+        if t["status"] not in ("done", "review"):
+            continue
+        r = rows.setdefault(t["agent"], {"agent": t["agent"], "done": 0, "review": 0, "firstTry": 0,
+                                         "failedAttempts": 0, "stopped": 0, "sizes": {s: 0 for s in SIZES}})
+        r[t["status"]] += 1
+        r["failedAttempts"] += t["attempts"]
+        r["stopped"] += 1 if t["attempts"] >= plan.max_attempts else 0
+        if t["status"] == "done":
+            r["firstTry"] += 1 if t["attempts"] == 0 else 0
+            r["sizes"][t["size"] if t["size"] in SIZES else "M"] += 1
+    return sorted(rows.values(), key=lambda r: (r["agent"] == "any", -r["done"], r["agent"]))
+
+
+def stats(root: Path, as_json: bool) -> int:
+    plan = Plan(root)
+    if not plan.exists:
+        return _no_plan(plan, as_json)
+    rows = agent_stats(plan)
+    archives = len(plan.archives())
+    scope = "current plan" + (f" and {archives} closed plan(s)" if archives else "")
+    if not rows:
+        return finish("NO_STATS", EXIT_OK, [f"NO_STATS: no finished tasks yet in the {scope}."],
+                      {"agents": []}, as_json)
+    done = sum(r["done"] for r in rows)
+    lines = [f"AGENT_STATS: {done} task(s) accepted by the user in the {scope}",
+             f"{'agent':<10} {'done':>4} {'first try':>10} {'failed att.':>11} {'per task':>8} {'stopped':>7} "
+             f"{'in review':>9}  sizes done"]
+    for r in rows:
+        first = f"{r['firstTry']} ({round(100 * r['firstTry'] / r['done'])}%)" if r["done"] else "-"
+        per_task = f"{r['failedAttempts'] / (r['done'] + r['review']):.1f}"
+        sizes = " ".join(f"{s}:{n}" for s, n in r["sizes"].items())
+        lines.append(f"{r['agent']:<10} {r['done']:>4} {first:>10} {r['failedAttempts']:>11} {per_task:>8} "
+                     f"{r['stopped']:>7} {r['review']:>9}  {sizes}")
+    lines.append(f"first try: accepted with no failed attempt; stopped: reached {plan.max_attempts} failed attempts.")
+    unknown = next((r for r in rows if r["agent"] == "any"), None)
+    if unknown:
+        lines.append(f"note: {unknown['done'] + unknown['review']} finished task(s) still say agent 'any': the "
+                     "executor did not record itself ('plan set T-xxx --agent ...'), so they compare nothing.")
+    return finish("AGENT_STATS", EXIT_OK, lines, {"agents": rows, "maxAttempts": plan.max_attempts}, as_json)
+
+
 # --- Briefs: what a fresh session or an executor needs, in one short read ---------------------------
 
 HANDOFF_RX = re.compile(r"^##\s+handoff\b", re.IGNORECASE)
@@ -608,16 +696,21 @@ BRIEF_DESIGN_LINES = 150
 BRIEF_HANDOFF_LINES = 80
 
 EXECUTOR_RULES = """EXECUTOR RULES
-- You work on this one task only. Read .ludovanta/AGENTS.platform.md first: modes, commands, report format.
+- You work on this one task only. Follow the project rules in AGENTS.md: modes, commands, report format.
 - Start with: python3 .ludovanta/ludovanta.py plan set {id} --status in-progress --agent <claude|codex>
   (on Windows use python or py -3 if python3 is missing).
 - Meet every criterion, the feel criteria included, at the fidelity and art direction above. For anything the
   player sees, capture the gameplay camera and look at it.
 - Verify: compile, the relevant tests, validate-assets. If a command returns EDITOR_OPEN and you have no Unity MCP
   tools, do not work around it: write "not compiled, Editor open" in the report; the orchestrator verifies.
+- Rules the task adds that can break silently get EditMode tests, as your own check. TESTS_FLAKY means a test
+  failed and then passed with no change: quarantine it and go on. If you changed what an existing test expects,
+  ignored, quarantined or deleted a test, add a line to the card's '## Log' and a 'Tests changed' line to the report.
 - Tick the criteria you verified. Add or update a '## Handoff' section at the end of the card: what exists now
   (files, scene objects, public API), decisions and gotchas the next tasks need. A few lines.
-- Then: plan set {id} --status review. If your own verification keeps failing, record it with 'plan fail'.
+- Then: plan set {id} --status review. It needs a green full 'test' run newer than your code (TESTS_NOT_GREEN
+  otherwise). If Unity cannot run here (Editor open, sandbox), add --unverified "<why, what you checked instead>".
+  If your own verification keeps failing, record it with 'plan fail'.
 - Do not edit other task cards, the plan structure, design.md, or anything listed under "Do not touch".
 - Your final message is the task report (What changed / How to check / Not done or uncertain / Next), at most
   20 lines. The orchestrator reads it, not the user."""
@@ -804,7 +897,7 @@ def close(root: Path, carry: bool) -> int:
         if (plan.dir / name).is_file():
             shutil.move(str(plan.dir / name), str(dest / name))
     summary = dest / "SUMMARY.md"
-    summary.write_text(_summary(plan, archived, unfinished, title), encoding="utf-8", newline="\n")
+    write_lf(summary, _summary(plan, archived, unfinished, title))
 
     lines = [f"PLAN_CLOSED: archived {len(archived)} task(s) to {plan.rel(dest)}/"
              + (f", carried {len(unfinished)} unfinished task(s) into the next plan" if unfinished else ""),

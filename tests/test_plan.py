@@ -236,6 +236,13 @@ def test_set_status_and_agent(planned):
     assert header(planned, "T-003")["agent"] == "claude"
 
 
+def test_set_in_progress_asks_to_record_the_agent(planned):
+    _, out = cli(planned, "set", "T-004", "--status", "in-progress")
+    assert "note: record who works on it ('plan set T-004 --agent claude|codex')" in out
+    _, out = cli(planned, "set", "T-006", "--status", "in-progress")
+    assert "record who works on it" not in out, "T-006 already names its agent"
+
+
 def test_set_review_notes_unticked_criteria(planned):
     _, out = cli(planned, "set", "T-003", "--status", "review")
     assert "1 acceptance criteria are not ticked" in out
@@ -367,3 +374,41 @@ def test_close_carries_unfinished_tasks(planned):
     _, out = cli(planned, "next", "--json")
     assert "T-003" in [t["id"] for t in json.loads(out)["tasks"]]
     assert "T-001 Task T-001 (archived):" in cli(planned, "brief", "T-003")[1]
+
+
+# --- agent statistics ------------------------------------------------------------------------------
+
+def test_stats_per_agent_with_closed_plans(game):
+    milestone(game, "M1", "Driving")
+    task(game, "T-001", status="done", agent="codex", size="S")
+    task(game, "T-002", status="done", agent="codex", size="M", attempts=2)
+    task(game, "T-003", status="done", agent="claude", size="M")
+    task(game, "T-004", status="dropped", agent="claude", attempts=1)
+    assert cli(game, "close")[0] == 0
+    milestone(game, "M2", "Ride")
+    task(game, "T-005", milestone="M2", status="done", agent="codex", size="S", attempts=3)
+    task(game, "T-006", milestone="M2", status="review", agent="claude", attempts=1)
+    task(game, "T-007", milestone="M2", status="done", agent="any")
+    task(game, "T-008", milestone="M2", status="todo", agent="codex")
+
+    code, out = cli(game, "stats")
+    assert code == 0, out
+    lines = out.splitlines()
+    assert lines[0] == "AGENT_STATS: 5 task(s) accepted by the user in the current plan and 1 closed plan(s)"
+    codex = next(line.split() for line in lines if line.startswith("codex "))
+    assert codex[:7] == ["codex", "3", "1", "(33%)", "5", "1.7", "1"] and codex[-3:] == ["S:2", "M:1", "L:0"]
+    claude = next(line.split() for line in lines if line.startswith("claude "))
+    assert claude[:7] == ["claude", "1", "1", "(100%)", "1", "0.5", "0"]
+    assert "1 finished task(s) still say agent 'any'" in out
+
+    data = json.loads(cli(game, "stats", "--json")[1])
+    assert [r["agent"] for r in data["agents"]] == ["codex", "claude", "any"]
+    assert data["agents"][1] == {"agent": "claude", "done": 1, "review": 1, "firstTry": 1, "failedAttempts": 1,
+                                 "stopped": 0, "sizes": {"S": 0, "M": 1, "L": 0}}
+
+
+def test_stats_without_finished_tasks(game):
+    milestone(game, "M1", "Driving")
+    task(game, "T-001")
+    code, out = cli(game, "stats")
+    assert code == 0 and out.startswith("NO_STATS"), out

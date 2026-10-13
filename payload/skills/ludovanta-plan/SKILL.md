@@ -1,6 +1,6 @@
 ---
 name: ludovanta-plan
-description: Plan the game and work by task cards. Use when the user asks to plan, break a goal down into tasks, show progress or "how much is done", pick the next task, continue the plan, or work on a task by id (T-001); also when a task fails repeatedly, the user rejects a result, a milestone is finished, the session context is large, or the plan is complete. Covers the plan/ folder, task cards with acceptance criteria, task statuses, running the plan as an orchestrator with one executor (subagent or Codex) per task, handoff and fresh sessions, closing a finished plan, and the stop-after-3-failed-attempts rule. For a new game or a big feature, the design pass (ludovanta-game-design) comes first.
+description: Plan the game and work by task cards. Use when the user asks to plan, break a goal down into tasks, show progress or "how much is done", pick the next task, continue the plan, or work on a task by id (T-001); also when a task fails repeatedly, the user rejects a result, a milestone is finished, the session context is large, or the plan is complete. Covers the plan/ folder, task cards with acceptance criteria, task statuses, running the plan as an orchestrator with one executor (subagent or Codex) per task, handoff and fresh sessions, closing a finished plan, the stop-after-3-failed-attempts rule, and splitting tasks between Claude and Codex with per-agent statistics (plan stats). Also use when the user asks which agent does what better. For a new game or a big feature, the design pass (ludovanta-game-design) comes first.
 ---
 
 # Project plan and task cards
@@ -30,11 +30,12 @@ python3 .ludovanta/ludovanta.py plan set T-001 --status in-progress|review|done|
 python3 .ludovanta/ludovanta.py plan fail T-001 "why the attempt failed"
 python3 .ludovanta/ludovanta.py plan brief                 # state + handoff, what a fresh session needs
 python3 .ludovanta/ludovanta.py plan brief T-001           # everything an executor needs for one task
+python3 .ludovanta/ludovanta.py plan stats                 # per agent: accepted tasks, first-try rate, failed attempts
 python3 .ludovanta/ludovanta.py plan close [--carry]       # archive a finished plan, numbering continues
 ```
 
-On Windows use `python` (or `py -3`) if `python3` is not available. `plan`, `plan check` and
-`plan next` accept `--json`. Create cards with `add-milestone` / `add-task` (they assign ids), then
+On Windows use `python` (or `py -3`) if `python3` is not available. `plan`, `plan check`,
+`plan next` and `plan stats` accept `--json`. Create cards with `add-milestone` / `add-task` (they assign ids), then
 edit the card text directly. Change statuses with `plan set` (it enforces the task contract).
 
 ## Task card
@@ -59,7 +60,7 @@ One or two sentences: what the player gets.
 - [ ] The fare grows with distance; the HUD shows it with two decimals
 - [ ] Each fare step ticks with a coin sound and the HUD number pops; the passenger comments when the
       driver brakes hard (screenshot and sound list in the report)
-- [ ] EditMode test FareCalculatorTests passes
+- [ ] At the end of the ride the fare is added to the day's earnings on the HUD
 
 ## Do not touch
 Car physics (T-004 is in review).
@@ -73,22 +74,41 @@ public API), decisions and gotchas the dependent tasks need. 'plan brief' passes
 
 - Write the card text in the user's language (headings too, if the user prefers). Only the header
   keys, the `- [ ]` checkbox syntax and the `## Handoff` heading are fixed.
-- Every checkbox in the body is an acceptance criterion. Criteria are observable: what the user sees
-  in Play mode or on a screenshot, a test name, a number. Not "code is clean", not "works well".
-  Two to five criteria per task.
+- Every checkbox in the body is an acceptance criterion. Criteria are what the user can observe: in
+  Play mode, on a screenshot, a number on the screen. Not "code is clean", not "works well", and not
+  tests: tests are the executor's own check, the user never reviews them. Two to five criteria per task.
 - A task that adds gameplay or something the player sees has at least one **feel criterion**: the
   feedback from the game feel table in `design.md` (animation, particles, sound, camera, UI, world
   reaction) or the look required by the fidelity. "The spell works" is not enough; "the cast has a
   charge glow, a beam, an impact burst with a sound and a camera shake, the rubble flies apart" is.
 - `size`: S (under an hour of agent work), M (one to two hours), L (half a day). Split anything
   bigger.
-- `agent`: who should do it: `claude`, `codex`, `any`, or a person. Leave `any` unless the user
-  has a rule for this project, or the task clearly needs one agent's strengths. `codex` fits small
-  (S), self-contained code tasks with clear criteria that need no Unity Editor or scene work (skill
-  `ludovanta-codex`). The user tunes these rules over time from the attempts history.
+- `agent`: who should do it: `claude`, `codex`, `any`, or a person. When work starts, the
+  executor replaces `any` with itself (`plan set T-xxx --agent claude`), so the card records who
+  did it; `plan stats` compares the agents by it. See "Splitting tasks between agents".
 - `status`: `todo` -> `in-progress` -> `review` (agent finished, waiting for the user) -> `done`
   (the user accepted). Also `blocked` and `dropped` (out of scope; excluded from progress).
 - Progress is weighted by size: S=1, M=2, L=4. Tasks in review are shown separately from done.
+
+## Splitting tasks between agents
+
+The project's rules for who does what are in `AGENTS.md`, outside the Ludovanta block (a heading such
+as `## Preferences`). Follow them when you set `agent` on new cards. Without project rules, start from
+these defaults; they are a hypothesis, not a law:
+
+- `codex`: small (S), self-contained code with clear criteria that needs no Unity Editor or scene
+  work: a calculator or data class with its EditMode tests, a parser, a config, an editor utility
+  (skill `ludovanta-codex`).
+- `claude`: scene and prefab wiring, anything that needs Unity MCP, game feel and visuals that must
+  be judged on screenshots, tasks whose criteria still need refining.
+- `any`: either fits; leave it when unsure.
+
+The rules are revised from data, not impressions. Every finished card records its executor and its
+failed attempts. When the user asks how the agents compare, at a plan's retrospective, or after two or
+three weeks of work, run `plan stats`: per agent, how many tasks were accepted, how many on the first
+try, failed attempts per task, how many hit the stop, by size. Show it in a few lines, propose one or two
+rule changes ("Codex fails M tasks: give it only S"), and after the user agrees write them into the
+preferences in `AGENTS.md`.
 
 ## Planning: breaking a goal down
 
@@ -109,9 +129,11 @@ public API), decisions and gotchas the dependent tasks need. 'plan brief' passes
 5. Scope: small in breadth, finished in feel. Out of scope go extra areas, mechanics and content, never
    the feedback, art or sound the fidelity requires. "Stubs only" is allowed only when the user chose
    it.
-6. Tests protect rules that can silently break: quest and progression logic, economy, damage, saves,
-   the route from start to end. Do not spend tasks on testing plumbing. Tests do not replace looking
-   at the game: visual tasks are checked on screenshots.
+6. Tests are not planned: no test tasks, no test criteria. The executor of a task covers the rules
+   that can silently break (quest and progression logic, economy, damage, saves, the route from start
+   to end) with tests as part of the task, and keeps the suite healthy on its own (skill
+   `ludovanta-unity-test`). Tests do not replace looking at the game: visual tasks are checked on
+   screenshots.
 7. Tasks are vertical: each one changes something visible or testable on its own. Prefer tasks that
    touch different files, so agents can work on them in parallel without merge conflicts.
 8. Write the acceptance criteria for every task you create. A task without criteria cannot start.
@@ -145,11 +167,18 @@ Orchestrator, for each task (`plan next`, or the one the user named):
 3. One executor at a time while the Unity Editor is open (LIVE): they share the Editor and its
    compilation. Parallel executors only in their own git worktrees (HEADLESS).
 4. Read the report. Check the claims that matter cheaply: the card's ticked criteria, the compile
-   and test status, a screenshot for anything visible. An executor's report is not proof.
+   and test status, a screenshot for anything visible. An executor's report is not proof. A task that
+   went to review `--unverified` (see the card's log) is not verified: run the full tests yourself
+   (`test`, or Unity MCP in LIVE mode) before reporting to the user. If it lists
+   "Tests changed", look at those diffs: an expectation bent to fit the code is a failed attempt.
 5. If the executor came back with a question, ask the user, then start a new executor with the
    answer. If it failed, `plan fail` and start a new one with a different approach.
 6. At the end of a milestone: the critic (skill `ludovanta-design-review`), then one report to the
    user and a playtest request (see "Working on a task", steps 5-7).
+7. Test upkeep is yours, not the user's, and not in the plan: when tests got in an executor's way
+   (flaky, quarantined, rewritten often) and at the end of a milestone, run `test-audit` and give the
+   cleanup to an executor without a task card (skill `ludovanta-unity-test`, "Audit"). Do not report it
+   to the user unless it changed how the game behaves.
 
 User feedback goes into the plan, not only into the conversation: a new criterion on a card, a fix
 task, or a line in `design.md` (art and feel preferences). Then the next executor sees it.
@@ -182,15 +211,16 @@ Handoff (also do it unasked at the end of a milestone in a long session, and in 
    feel and art direction the task must meet).
 2. If the criteria are missing or ambiguous, propose criteria and ask the user before starting.
    Otherwise start without asking: the user prefers autonomy and a result to review.
-3. `plan set T-xxx --status in-progress`.
+3. `plan set T-xxx --status in-progress --agent claude` (or whoever you are).
 4. Do the work. Verify each criterion yourself (compile, tests, Unity MCP, screenshots) and tick
    (`- [x]`) the ones you verified. Leave the ones only the user can judge unticked. For anything
    the player sees, capture the gameplay camera and look at it before calling it done.
 5. When the task completes a milestone with new gameplay, run the critic first (skill
    `ludovanta-design-review`, checkpoint `first-playable` for the first milestone, `milestone` later)
    and fix its BLOCKER and MAJOR findings.
-6. `plan set T-xxx --status review` and report with the format from `.ludovanta/AGENTS.platform.md`
-   ("Task report"). Do not set `done` yourself: the user accepts the task. You may continue with the
+6. `plan set T-xxx --status review` (the test gate: it needs a green full `test` run newer than the
+   code, see `AGENTS.md`, Feedback loop) and report with the format from `AGENTS.md`
+   ("Report against the criteria"). Do not set `done` yourself: the user accepts the task. You may continue with the
    next tasks of the milestone while earlier ones wait in review (dependencies in review count as
    met); ask for the user's playtest at the end of the milestone rather than after every task.
 7. If the user accepts, `plan set T-xxx --status done`. If the user rejects, record it:
@@ -226,7 +256,7 @@ and `design.md` go on.
    the next plan; tasks of closed plans count as done dependencies.
 3. Fill the `## Retrospective` in `SUMMARY.md` with the user: what the playtest showed, what was fun
    and what was boring, which tasks failed and why, what to change in how agents work (sizes, the
-   `agent` field).
+   `agent` field; `plan stats` gives the numbers, see "Splitting tasks between agents").
 4. The next iteration starts with the design (skill `ludovanta-game-design`, "Next iteration"), then
    `plan init --title "..."` for the new `goal.md`, then planning as above.
 5. Commit the closed plan and the new plan separately.

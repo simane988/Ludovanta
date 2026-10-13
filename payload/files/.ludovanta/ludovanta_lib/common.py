@@ -46,6 +46,11 @@ def read_text(path: Path) -> str:
     return Path(path).read_text(encoding="utf-8-sig", errors="replace")
 
 
+def write_lf(path: Path, text: str) -> None:
+    """UTF-8 with LF line endings on every OS (Path.write_text has no 'newline' argument before Python 3.10)."""
+    Path(path).write_bytes(text.replace("\r\n", "\n").encode("utf-8"))
+
+
 # --- Project -------------------------------------------------------------------
 
 def find_project_root(start=None) -> Path:

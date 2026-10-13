@@ -7,11 +7,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
-from . import parsers
+from . import parsers, testgate
 from .common import (EXIT_EDITOR_OPEN, EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, EXIT_TIMEOUT, IS_WINDOWS, LudovantaError,
-                     editor_open, finish, new_log_path, read_text, relpath, resolve_unity, run_unity, unity_version)
+                     editor_open, finish, load_config, new_log_path, read_text, relpath, resolve_unity, run_unity,
+                     unity_version)
 
 EDITOR_OPEN_LINE = "EDITOR_OPEN: Unity (Editor or another batchmode run) has this project open, batchmode cannot run."
 
@@ -47,6 +49,10 @@ def status(root: Path, as_json: bool) -> int:
     from .codex import find_codex
     codex = find_codex(root)
     lines.append(f"codex cli: {codex}" if codex else "codex cli: not found - tasks for agent 'codex' cannot be delegated here")
+    targets = [str(t).strip("/") for t in load_config(root).get("skillTargets") or [".claude/skills", ".agents/skills"]]
+    if codex and ".agents/skills" not in targets:
+        lines.append("codex skills: Codex does not see the ludovanta-* skills - add \".agents/skills\" to "
+                     "\"skillTargets\" in ludovanta.json and run 'update'")
     data = {"project": str(root), "platformVersion": platform_version, "unityVersion": unity_version(root),
             "unityEditor": unity, "editorOpen": is_open, "mode": mode, "mcpPackage": has_mcp, "codex": codex}
     return finish(mode, EXIT_OK, lines, data, as_json)
@@ -99,19 +105,19 @@ def compile_project(root: Path, timeout: int, max_items: int, warnings: bool, as
 
 
 # --- test ---------------------------------------------------------------------------
+# Tests are the agents' self-check. Two things keep a flaky test from sending an agent in circles:
+#   * quarantine: tests in the NUnit category 'Flaky' still run and are reported, but their failures do not fail the run;
+#   * rerun: failed tests run once more; one that passes with no code change is flaky, not broken by the change.
 
-def run_tests(root: Path, platform: str, test_filter: str | None, category: str | None, timeout: int,
-              max_items: int, as_json: bool) -> int:
-    if editor_open(root):
-        return finish("EDITOR_OPEN", EXIT_EDITOR_OPEN, [
-            EDITOR_OPEN_LINE,
-            "Live mode: run tests through a Unity MCP tool if one is available, otherwise ask the user to run them "
-            "in the Test Runner window or to close the Editor."], {}, as_json)
+QUARANTINE = "Flaky"
+RERUN_MAX = 5   # more failures than this are almost never flakiness: do not spend another Unity start on them
 
-    unity = resolve_unity(root)
+
+def _run_tests_once(root: Path, unity: Path, platform: str, test_filter: str | None, category: str | None,
+                    timeout: int) -> dict:
+    """One batchmode run: {'status': 'RESULTS' | 'TIMEOUT' | 'COMPILE_FAILED' | 'UNITY_FAILED', ...}."""
     log = new_log_path(root, f"test-{platform.lower()}")
     xml_path = log.with_suffix(".xml")
-    rel_log = relpath(root, log)
     args = ["-batchmode", "-projectPath", str(root), "-runTests", "-testPlatform", platform,
             "-testResults", str(xml_path), "-logFile", str(log)]
     if platform == "EditMode":
@@ -120,43 +126,197 @@ def run_tests(root: Path, platform: str, test_filter: str | None, category: str 
         args += ["-testFilter", test_filter]
     if category:
         args += ["-testCategory", category]
-
     run = run_unity(unity, args, timeout)
-    data: dict = {"platform": platform, "seconds": run["seconds"], "log": rel_log}
-
+    out = {"log": log, "relLog": relpath(root, log), "seconds": run["seconds"], "exitCode": run["exit_code"]}
     if run["timed_out"]:
-        return finish("TIMEOUT", EXIT_TIMEOUT, [f"TIMEOUT: tests did not finish in {timeout} s (log: {rel_log})."],
-                      data, as_json)
+        return {**out, "status": "TIMEOUT"}
     if not xml_path.is_file():
         errors = [m for m in parsers.compiler_messages(log, root) if m["severity"] == "error"]
-        if errors:
-            data["errors"] = errors
-            lines = [f"COMPILE_FAILED: tests did not run, {len(errors)} compiler error(s) (log: {rel_log})"]
-            lines += [parsers.format_compiler_message(e) for e in errors[:max_items]]
-            return finish("COMPILE_FAILED", EXIT_PROBLEMS, lines, data, as_json)
-        return _unity_failed("UNITY_FAILED", f"UNITY_FAILED: no test results produced, Unity exit code "
-                             f"{run['exit_code']} after {run['seconds']}s (log: {rel_log})", log, data, as_json)
+        return {**out, "status": "COMPILE_FAILED" if errors else "UNITY_FAILED", "errors": errors}
+    return {**out, "status": "RESULTS", "results": parsers.test_results(xml_path, root),
+            "relResults": relpath(root, xml_path)}
 
-    r = parsers.test_results(xml_path, root)
-    data.update({"total": r["total"], "passed": r["passed"], "failed": r["failed"], "skipped": r["skipped"],
-                 "failures": r["failures"], "results": relpath(root, xml_path)})
+
+def _no_results(once: dict, timeout: int, max_items: int, data: dict, as_json: bool) -> int:
+    rel_log = once["relLog"]
+    if once["status"] == "TIMEOUT":
+        return finish("TIMEOUT", EXIT_TIMEOUT, [f"TIMEOUT: tests did not finish in {timeout} s (log: {rel_log})."],
+                      data, as_json)
+    if once["status"] == "COMPILE_FAILED":
+        data["errors"] = once["errors"]
+        lines = [f"COMPILE_FAILED: tests did not run, {len(once['errors'])} compiler error(s) (log: {rel_log})"]
+        lines += [parsers.format_compiler_message(e) for e in once["errors"][:max_items]]
+        return finish("COMPILE_FAILED", EXIT_PROBLEMS, lines, data, as_json)
+    return _unity_failed("UNITY_FAILED", f"UNITY_FAILED: no test results produced, Unity exit code "
+                         f"{once['exitCode']} after {once['seconds']}s (log: {rel_log})", once["log"], data, as_json)
+
+
+def _failure_lines(failures: list[dict], max_items: int, more_in: str) -> list[str]:
+    lines = []
+    for f in failures[:max_items]:
+        lines.append(f"- {f['name']}")
+        message_lines = [m.strip() for m in f["message"].splitlines() if m.strip()]
+        lines += [f"    {m}" for m in message_lines[:6]]
+        lines += [f"    at {loc}" for loc in f["locations"]]
+    if len(failures) > max_items:
+        lines.append(f"... {len(failures) - max_items} more failure(s), see {more_in}")
+    return lines
+
+
+def _exact_filter(names: list[str]) -> str | None:
+    """-testFilter for these tests: Unity reads each ';'-separated part as a regex. No '^': cmd.exe eats it when Unity
+    is started through a .cmd wrapper."""
+    if not names or any(";" in n for n in names):
+        return None
+    return ";".join(re.escape(n) + "$" for n in names)
+
+
+def _quarantine_lines(quarantined: list[dict], failed: list[dict]) -> list[str]:
+    if not quarantined:
+        return []
+    failed_names = {f["name"] for f in failed}
+    lines = [f"quarantine: {len(quarantined)} test(s) in category '{QUARANTINE}', {len(failed_names)} failed this run "
+             "(not counted; fix them when you can: skill ludovanta-unity-test, 'Flaky tests')"]
+    lines += [f"  {c['name']}" + (" - failed" if c["name"] in failed_names else "") for c in quarantined[:10]]
+    return lines
+
+
+def run_tests(root: Path, platform: str, test_filter: str | None, category: str | None, timeout: int,
+              max_items: int, as_json: bool, repeat: int = 1, rerun: bool = True) -> int:
+    if editor_open(root):
+        return finish("EDITOR_OPEN", EXIT_EDITOR_OPEN, [
+            EDITOR_OPEN_LINE,
+            "Live mode: run tests through a Unity MCP tool if one is available, otherwise leave them to the "
+            "orchestrator or ask the user to close the Editor."], {}, as_json)
+    unity = resolve_unity(root)
+    if repeat > 1:
+        return _repeat_tests(root, unity, platform, test_filter, category, timeout, max_items, as_json, repeat)
+
+    started = time.time()
+
+    def remember(status: str, failed: list[dict]) -> None:
+        """A full run is what 'plan set --status review' checks (testgate)."""
+        if not test_filter and not category:
+            testgate.record(root, platform, started, status, [f["name"] for f in failed])
+
+    once = _run_tests_once(root, unity, platform, test_filter, category, timeout)
+    data: dict = {"platform": platform, "seconds": once["seconds"], "log": once["relLog"]}
+    if once["status"] != "RESULTS":
+        remember(once["status"], [])
+        return _no_results(once, timeout, max_items, data, as_json)
+
+    r = once["results"]
+    quarantined = [c for c in r["cases"] if QUARANTINE in c["categories"]]
+    q_failed = [f for f in r["failures"] if QUARANTINE in f["categories"]]
+    failures = [f for f in r["failures"] if QUARANTINE not in f["categories"]]
+    seconds = once["seconds"]
+
+    flaky, notes = [], []
+    if failures and rerun:
+        rerun_filter = _exact_filter([f["name"] for f in failures]) if len(failures) <= RERUN_MAX else None
+        if rerun_filter:
+            again = _run_tests_once(root, unity, platform, rerun_filter, category, timeout)
+            seconds = round(seconds + again["seconds"], 1)
+            if again["status"] == "RESULTS":
+                seen = {c["name"]: c["result"] for c in again["results"]["cases"]}
+                flaky = [f for f in failures if seen.get(f["name"]) == "Passed"]
+                failures = [f for f in failures if seen.get(f["name"]) != "Passed"]
+                confirmed = sum(1 for f in failures if seen.get(f["name"]) == "Failed")
+                if confirmed:
+                    notes.append(f"{confirmed} of the failure(s) above failed again on a rerun: they are real")
+                if confirmed < len(failures):
+                    notes.append(f"note: {len(failures) - confirmed} failed test(s) were not found by the rerun filter, "
+                                 "so flakiness could not be checked for them")
+            else:
+                notes.append(f"note: the rerun of the failed tests did not finish ({again['status']}, "
+                             f"log: {again['relLog']})")
+
+    data.update({"seconds": seconds, "total": r["total"], "passed": r["passed"], "failed": r["failed"],
+                 "skipped": r["skipped"], "failures": failures, "flaky": [f["name"] for f in flaky],
+                 "quarantined": [c["name"] for c in quarantined], "quarantinedFailed": [f["name"] for f in q_failed],
+                 "results": once["relResults"]})
     counts = f"{r['failed']} failed, {r['passed']} passed, {r['skipped']} skipped, total {r['total']}"
+    tail = notes
+    if flaky:
+        tail += [f"flaky: {len(flaky)} test(s) failed, then passed on a rerun with no code change: your change did not "
+                 f"break them. Quarantine each with [Category(\"{QUARANTINE}\")] and go on (skill ludovanta-unity-test, "
+                 "'Flaky tests'):"] + [f"  {f['name']}" for f in flaky]
+    tail += _quarantine_lines(quarantined, q_failed)
 
-    if r["failed"]:
-        lines = [f"TESTS_FAILED ({platform}): {counts} in {run['seconds']}s (log: {rel_log})"]
-        for f in r["failures"][:max_items]:
-            lines.append(f"- {f['name']}")
-            message_lines = [m.strip() for m in f["message"].splitlines() if m.strip()]
-            lines += [f"    {m}" for m in message_lines[:6]]
-            lines += [f"    at {loc}" for loc in f["locations"]]
-        if len(r["failures"]) > max_items:
-            lines.append(f"... {len(r['failures']) - max_items} more failure(s), see {data['results']}")
-        return finish("TESTS_FAILED", EXIT_PROBLEMS, lines, data, as_json)
+    if failures:
+        remember("TESTS_FAILED", failures)
+        lines = [f"TESTS_FAILED ({platform}): {counts} in {seconds}s (log: {once['relLog']})"]
+        lines += _failure_lines(failures, max_items, data["results"])
+        return finish("TESTS_FAILED", EXIT_PROBLEMS, lines + tail, data, as_json)
     if r["total"] == 0:
+        remember("NO_TESTS", [])
         what = "no tests matched the filter" if (test_filter or category) else "no tests found"
-        return finish("NO_TESTS", EXIT_OK, [f"NO_TESTS ({platform}): {what} in {run['seconds']}s. "
+        return finish("NO_TESTS", EXIT_OK, [f"NO_TESTS ({platform}): {what} in {seconds}s. "
                                             "Check the test assembly (.asmdef) setup or the filter."], data, as_json)
-    return finish("TESTS_PASSED", EXIT_OK, [f"TESTS_PASSED ({platform}): {counts} in {run['seconds']}s"], data, as_json)
+    status = "TESTS_FLAKY" if flaky else "TESTS_PASSED"
+    remember(status, [])
+    return finish(status, EXIT_OK, [f"{status} ({platform}): {counts} in {seconds}s"] + tail, data, as_json)
+
+
+def _repeat_tests(root: Path, unity: Path, platform: str, test_filter: str | None, category: str | None,
+                  timeout: int, max_items: int, as_json: bool, repeat: int) -> int:
+    """The same tests 'repeat' times with no change in between: a test with mixed results is flaky."""
+    history: dict[str, dict] = {}
+    seconds, logs = 0.0, []
+    for i in range(repeat):
+        once = _run_tests_once(root, unity, platform, test_filter, category, timeout)
+        seconds = round(seconds + once["seconds"], 1)
+        logs.append(once["relLog"])
+        if once["status"] != "RESULTS":
+            data = {"platform": platform, "seconds": seconds, "log": once["relLog"], "run": i + 1}
+            return _no_results(once, timeout, max_items, data, as_json)
+        failures = {f["name"]: f for f in once["results"]["failures"]}
+        for c in once["results"]["cases"]:
+            h = history.setdefault(c["name"], {"name": c["name"], "passed": 0, "failed": 0,
+                                               "quarantined": QUARANTINE in c["categories"], "failure": None})
+            if c["result"] == "Passed":
+                h["passed"] += 1
+            elif c["result"] == "Failed":
+                h["failed"] += 1
+                h["failure"] = failures.get(c["name"])
+
+    tests = list(history.values())
+    flaky = [t for t in tests if t["passed"] and t["failed"]]
+    broken = [t for t in tests if t["failed"] and not t["passed"]]
+    stable_quarantined = [t for t in tests if t["quarantined"] and t["passed"] == repeat]
+    data = {"platform": platform, "repeat": repeat, "seconds": seconds, "logs": logs, "tests": len(tests),
+            "flaky": [t["name"] for t in flaky], "failing": [t["name"] for t in broken],
+            "stableQuarantined": [t["name"] for t in stable_quarantined]}
+
+    def describe(t: dict) -> list[str]:
+        out = [f"- {t['name']}: failed {t['failed']} of {repeat}" + (" (quarantined)" if t["quarantined"] else "")]
+        if t["failure"]:
+            out += [f"    {m.strip()}" for m in t["failure"]["message"].splitlines() if m.strip()][:3]
+            out += [f"    at {loc}" for loc in t["failure"]["locations"][:1]]
+        return out
+
+    if any(not t["quarantined"] for t in broken):
+        status, code = "TESTS_FAILED", EXIT_PROBLEMS
+    elif any(not t["quarantined"] for t in flaky):
+        status, code = "TESTS_FLAKY", EXIT_PROBLEMS
+    else:
+        status, code = "TESTS_STABLE", EXIT_OK
+    lines = [f"{status} ({platform}): {len(tests)} test(s) run {repeat} times in {seconds}s: {len(flaky)} flaky, "
+             f"{len(broken)} always failing"]
+    if flaky:
+        lines.append(f"flaky (mixed results with no code change; quarantine with [Category(\"{QUARANTINE}\")] until "
+                     "fixed):")
+        for t in flaky[:max_items]:
+            lines += describe(t)
+    if broken:
+        lines.append("always failing (a real failure, not flakiness):")
+        for t in broken[:max_items]:
+            lines += describe(t)
+    if stable_quarantined:
+        lines.append(f"quarantined but passed all {repeat} runs (if the cause is fixed, remove "
+                     f"[Category(\"{QUARANTINE}\")]):")
+        lines += [f"  {t['name']}" for t in stable_quarantined[:max_items]]
+    return finish(status, code, lines, data, as_json)
 
 
 # --- validate-assets -----------------------------------------------------------------

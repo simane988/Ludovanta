@@ -86,24 +86,48 @@ def stack_locations(stack: str, root, limit: int = 3) -> list[str]:
     return result
 
 
+def _categories(el) -> set[str]:
+    return {p.get("value", "") for p in el.findall("properties/property") if p.get("name") == "Category"}
+
+
+def _cases(el, inherited: set[str], out: list) -> None:
+    """Test cases with their categories, including those set on the fixture or the assembly."""
+    cats = inherited | _categories(el)
+    if el.tag == "test-case":
+        out.append((el, cats))
+        return
+    for child in el:
+        if child.tag in ("test-suite", "test-case"):
+            _cases(child, cats, out)
+
+
+def _float(value: str | None) -> float:
+    try:
+        return float(value or 0)
+    except ValueError:
+        return 0.0
+
+
 def test_results(xml_path: Path, root) -> dict:
     tree = ET.parse(str(xml_path))
     run = tree.getroot()
     if run.tag != "test-run":
         raise ValueError(f"Not an NUnit3 result file: {xml_path}")
-    failures = []
-    for case in run.iter("test-case"):
-        if case.get("result") != "Failed":
+    found: list = []
+    _cases(run, set(), found)
+    cases, failures = [], []
+    for case, cats in found:
+        item = {"name": case.get("fullname", ""), "result": case.get("result", ""), "categories": sorted(cats),
+                "duration": round(_float(case.get("duration")), 3)}
+        cases.append(item)
+        if item["result"] != "Failed":
             continue
         failures.append({
-            "name": case.get("fullname", ""),
+            "name": item["name"],
+            "categories": item["categories"],
             "message": (case.findtext("failure/message") or "").strip(),
             "locations": stack_locations(case.findtext("failure/stack-trace") or "", root),
         })
-    try:
-        duration = round(float(run.get("duration", "0")), 1)
-    except ValueError:
-        duration = 0.0
     return {
         "result": run.get("result", ""),
         "total": int(run.get("total", "0")),
@@ -111,6 +135,7 @@ def test_results(xml_path: Path, root) -> dict:
         "failed": int(run.get("failed", "0")),
         "skipped": int(run.get("skipped", "0")),
         "inconclusive": int(run.get("inconclusive", "0")),
-        "duration": duration,
+        "duration": round(_float(run.get("duration")), 1),
         "failures": failures,
+        "cases": cases,
     }

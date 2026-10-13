@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install or update Ludovanta in a Unity project.
 
-    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.2
+    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.3
 
 Ownership model that keeps updates free of merge problems:
   * Platform-owned files (.ludovanta/**, <skillTarget>/ludovanta-*/**) are written only by this script.
@@ -42,6 +42,7 @@ END_TOKEN = "<<< ludovanta:managed"
 LOCK_REL = ".ludovanta/lock.json"
 BLOCK_FILES = [("AGENTS.md", "html"), ("CLAUDE.md", "html"), (".gitignore", "hash"), (".gitattributes", "hash")]
 SKIP_PAYLOAD = {"__pycache__", ".DS_Store"}
+DEFAULT_SKILL_TARGETS = (".claude/skills", ".agents/skills")   # Claude Code, Codex
 BOM = b"\xef\xbb\xbf"
 
 
@@ -103,7 +104,7 @@ def payload_files(folder: Path) -> dict[str, str]:
 
 
 def skill_targets(cfg: dict | None) -> list[str]:
-    targets = (cfg or {}).get("skillTargets") or [".claude/skills"]
+    targets = (cfg or {}).get("skillTargets") or list(DEFAULT_SKILL_TARGETS)
     result = []
     for t in targets:
         raw = str(t).replace("\\", "/").strip()

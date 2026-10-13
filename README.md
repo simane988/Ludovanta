@@ -17,18 +17,20 @@ Unity Hub. Работает на Windows, macOS и Linux.
 ```
 <project>/
   .ludovanta/                           # принадлежит платформе, заменяется целиком при обновлении
-    AGENTS.platform.md                  #   инструкции для агентов (режимы LIVE/HEADLESS, правила, коды выхода)
-    ludovanta.py                        #   единая точка входа: status | compile | test | validate-assets | plan | codex | update
+    ludovanta.py                        #   единая точка входа: status | compile | test | test-audit | validate-assets | plan | codex | feedback | update
     ludovanta_lib/                      #   реализация команд
     hook.sh                             #   запуск хуков Claude Code (ищет Python 3.9+)
     lock.json                           #   установленная версия + хэши всех файлов платформы
-  .claude/skills/ludovanta-*/SKILL.md   # скиллы платформы (папки для скиллов настраиваются)
+  .claude/skills/ludovanta-*/SKILL.md   # скиллы платформы для Claude Code
+  .agents/skills/ludovanta-*/SKILL.md   # те же скиллы для Codex (папки задаются в skillTargets)
   .claude/settings.json                 # + хуки Ludovanta (SessionStart, Stop), остальные настройки ваши
-  AGENTS.md, CLAUDE.md                  # + управляемый блок ludovanta:managed, остальной текст ваш
+  AGENTS.md                             # + блок ludovanta:managed с правилами для агентов, остальной текст ваш
+  CLAUDE.md                             # + блок ludovanta:managed с импортом @AGENTS.md, остальной текст ваш
   .gitignore, .gitattributes            # + управляемый блок ludovanta:managed
   ludovanta.json                        # ваш: откуда и какую версию платформы брать
   ludovanta.local.json                  # ваш, в .gitignore: настройки конкретной машины
   plan/                                 # ваш (создаёт `plan init`): цель, дизайн игры, майлстоуны, карточки задач
+  docs/feedback-log.md                  # ваш (создаёт `feedback add`): журнал трения
 ```
 
 Команды (из корня проекта; на Windows `python` или `py -3` вместо `python3`):
@@ -36,14 +38,18 @@ Unity Hub. Работает на Windows, macOS и Linux.
 ```
 python3 .ludovanta/ludovanta.py status            # LIVE (открыт Editor) или HEADLESS, найден ли Unity
 python3 .ludovanta/ludovanta.py compile           # компиляция в batchmode, компактный список ошибок
-python3 .ludovanta/ludovanta.py test [--platform EditMode|PlayMode] [--filter X] [--category Y]
+python3 .ludovanta/ludovanta.py test [--platform EditMode|PlayMode] [--filter X] [--category Y] [--repeat N]
+python3 .ludovanta/ludovanta.py test-audit        # хрупкие, медленные и нестабильные тесты, без запуска Unity
 python3 .ludovanta/ludovanta.py validate-assets   # .meta / GUID без запуска Unity
 python3 .ludovanta/ludovanta.py plan              # план проекта: прогресс, задачи на проверке, следующие задачи
 python3 .ludovanta/ludovanta.py plan next|check|init|add-milestone|add-task|set|fail
 python3 .ludovanta/ludovanta.py plan brief [T-001]   # сводка для новой сессии или для исполнителя задачи
 python3 .ludovanta/ludovanta.py plan close [--carry] # закрыть выполненный план в plan/archive/
+python3 .ludovanta/ludovanta.py plan stats           # по агентам: принято задач, с первой попытки, неудачные попытки
 python3 .ludovanta/ludovanta.py codex run T-001      # отдать задачу Codex CLI
 python3 .ludovanta/ludovanta.py codex image "описание" --out Art/References/hero.png   # референс через Codex
+python3 .ludovanta/ludovanta.py feedback add "что мешает" --doing "что делали" --severity 1|2|3
+python3 .ludovanta/ludovanta.py feedback show [--days 7]  # журнал трения для еженедельного разговора
 python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 ```
 
@@ -58,8 +64,9 @@ python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 | `ludovanta-game-design` | новая игра или большая фича: фантазия, основной глагол, прогон сессии, game feel, арт-направление и уровень проработки графики в `plan/design.md`; жалоба «скучно / сыро» |
 | `ludovanta-design-review` | критик качества игры: план перед показом пользователю, первая играбельная версия, конец майлстоуна, «почему скучно» |
 | `ludovanta-unity-compile` | после изменений C#/asmdef/пакетов, разбор ошибок компиляции, live-режим через Unity MCP |
-| `ludovanta-unity-test` | запуск и написание EditMode/PlayMode тестов, настройка тестовых asmdef |
+| `ludovanta-unity-test` | тесты как самопроверка агента: запуск и написание EditMode/PlayMode тестов, какой тест хороший, нестабильные тесты и карантин, аудит набора тестов |
 | `ludovanta-plan` | планирование и декомпозиция, прогресс, оркестратор и исполнители задач, handoff и новые сессии, закрытие плана, остановка после 3 неудачных попыток |
+| `ludovanta-feedback` | «запиши, что неудобно»: запись в журнал трения `docs/feedback-log.md` и сводка за неделю |
 | `ludovanta-codex` | Codex CLI как исполнитель небольших задач (`agent: codex`) и генератор картинок-референсов |
 | `ludovanta-unity-assets` | создание/перенос/удаление ассетов, .meta и GUID, правила для сцен и префабов |
 | `ludovanta-platform-update` | обновление платформы, разбор конфликтов в файлах платформы |
@@ -99,7 +106,10 @@ greybox. У задач с геймплеем есть критерии ощущ�
 если `design.md` нет или уровень проработки не выбран, а `plan` показывает выбранный уровень.
 
 Распределение между агентами задаёт поле `agent` (`claude`, `codex`, `any` или человек), а
-`plan next --agent codex` выдаёт задачи, готовые для конкретного агента.
+`plan next --agent codex` выдаёт задачи, готовые для конкретного агента. Взяв задачу, исполнитель
+записывает себя в `agent`, поэтому `plan stats` показывает по каждому агенту, сколько задач принято,
+сколько с первой попытки, сколько было неудачных попыток и остановок, с учётом закрытых планов. Правила
+распределения проекта записываются в `AGENTS.md` вне блока платформы и пересматриваются по этим цифрам.
 
 ### Длинные планы и контекст
 
@@ -135,14 +145,69 @@ Codex CLI подключается как второй агент: исполн�
 `codex`. `codex run T-xxx` передаёт задачу в `codex exec` через файл с брифом (без длинных аргументов
 командной строки, которые ломает cmd.exe) и печатает короткий отчёт и изменённые файлы. Настройки:
 `ludovanta.json` → `"codex": {"sandbox": "workspace-write", "model": "..."}`, путь к исполняемому файлу:
-`ludovanta.local.json` → `"codexPath"` или `CODEX_PATH`. Чтобы Codex видел скиллы платформы, добавьте
-`.agents/skills` в `skillTargets`.
+`ludovanta.local.json` → `"codexPath"` или `CODEX_PATH`.
+
+### Одни правила для Claude и Codex
+
+Правила платформы лежат прямо в управляемом блоке `AGENTS.md`: Codex читает этот файл сам, а
+`CLAUDE.md` импортирует его (`@AGENTS.md`). Поэтому оба агента, в том числе запущенные из Orca,
+видят одни и те же правила и одни и те же настройки проекта. Скиллы ставятся в `.claude/skills` и в
+`.agents/skills` (по умолчанию для новых установок). В проектах, установленных раньше, добавьте
+`.agents/skills` в `skillTargets` и запустите `update`. Если Codex найден, а скиллов для него нет,
+`status` об этом предупреждает.
+
+Настройки проекта, например язык и подробность отчётов или правила распределения задач, пишутся в
+`AGENTS.md` вне блока платформы. Агент сам добавляет туда строку, когда пользователь просит что-то
+делать всегда. Не стоит писать их в `CLAUDE.md` или `ludovanta.local.json`: Codex и новые worktree их
+не увидят. Пример:
+
+```markdown
+## Preferences
+
+- Язык: отвечай и пиши карточки по-русски, технические термины по-английски. Коротко, без объяснений основ.
+- Codex: задачи размера S без работы со сценой. Всё со сценами, префабами и Unity MCP делает Claude.
+```
+
+### Тесты: самопроверка агентов
+
+Тестами занимаются только агенты. Пользователь их не пишет, не запускает и не проверяет. Тестов нет
+ни в критериях приёмки, ни в задачах плана, а в отчёты пользователю детали тестов не попадают.
+
+- `test` перезапускает упавшие тесты один раз (до 5 штук). Если тест прошёл без изменений кода, он
+  нестабильный: команда отвечает `TESTS_FLAKY` с кодом 0, а не `TESTS_FAILED`, и агент не пытается
+  «чинить» то, что не ломал.
+- Карантин: тесты с `[Category("Flaky")]` запускаются и видны в каждом результате, но их падения не
+  проваливают прогон. Агент чинит их позже и снимает категорию, когда `test --filter X --repeat 5`
+  отвечает `TESTS_STABLE`.
+- `test --repeat N` прогоняет одни и те же тесты N раз и делит их на нестабильные и падающие всегда.
+- `test-audit` без запуска Unity ищет признаки плохих тестов: рефлексию в приватные поля, ожидание в
+  реальном времени, случайность без seed, точное сравнение float, поиск объектов по имени,
+  `[Ignore]` и карантин, медленные тесты, тесты, которые часто падали в последних прогонах, файлы
+  тестов, переписанные много раз за 30 дней, и игровой код вне `.asmdef`. Оркестратор запускает аудит
+  в конце майлстоуна и отдаёт чистку исполнителю без карточки в плане.
+- Каждое изменение ожиданий теста, `[Ignore]`, карантин или удаление записывается в `## Log` карточки
+  задачи, а оркестратор проверяет такие правки.
+- **Гейт.** `test` запоминает каждый полный прогон (без `--filter` и `--category`) по платформам в
+  `Logs/ludovanta/test-state.json`. `plan set --status review` отказывает с `TESTS_NOT_GREEN`, пока у
+  каждой платформы, где есть тестовая сборка, нет зелёного полного прогона, начатого после последней
+  правки кода (`.cs`, `.asmdef`, `.asmref`, `Packages/manifest.json`). Нестабильные тесты и тесты в
+  карантине не блокируют, проекты без тестовых сборок проходят. Если Ludovanta не может запустить Unity
+  (открыт Editor, песочница Codex), агент пишет `--unverified "почему и что проверил вместо этого"`.
+  Это попадает в журнал карточки, и оркестратор прогоняет тесты сам до отчёта пользователю.
+
+### Журнал трения
+
+Фраза агенту «запиши, что неудобно» добавляет строку в `docs/feedback-log.md` (скилл
+`ludovanta-feedback`): дата, что делали, что помешало, сила от 1 до 3. Перед еженедельным разговором
+`feedback show` выводит записи за неделю, самые серьёзные сверху. Файл принадлежит проекту и только
+дописывается, а `.gitattributes` сливает его с `merge=union`, поэтому записи из параллельных worktree
+не конфликтуют.
 
 ## Установка в проект
 
 ```
 git clone <url-этого-репозитория> ludovanta
-python3 ludovanta/install.py --project /path/to/MyGame --source <url-этого-репозитория> --ref v0.1.2
+python3 ludovanta/install.py --project /path/to/MyGame --source <url-этого-репозитория> --ref v0.1.3
 ```
 
 `--source` и `--ref` записываются в `ludovanta.json` проекта и дальше используются для обновлений.
@@ -190,11 +255,11 @@ python3 .ludovanta/ludovanta.py update --ref v0.2.0    # на другую ве�
 
 ### Как кастомизировать, не ломая обновления
 
-- Свои инструкции: в `AGENTS.md` / `CLAUDE.md` вне блока `ludovanta:managed`.
+- Свои инструкции и настройки: в `AGENTS.md` вне блока `ludovanta:managed` (их видят и Claude, и Codex).
 - Свои скиллы: папки без префикса `ludovanta-`.
 - Путь к Unity на конкретной машине: `ludovanta.local.json` → `{ "unityEditorPath": "D:/Unity/6000.0.30f1/Editor/Unity.exe" }`
   (на macOS можно указать `.app`) или переменная окружения `UNITY_EDITOR_PATH`.
-- Папки для скиллов других агентов: `ludovanta.json` → `"skillTargets": [".claude/skills", ".agents/skills"]`,
+- Папки для скиллов агентов: `ludovanta.json` → `"skillTargets"` (по умолчанию `[".claude/skills", ".agents/skills"]`),
   затем `update`. Убранная из списка папка будет очищена от `ludovanta-*`.
 
 ## Режимы работы агентов
