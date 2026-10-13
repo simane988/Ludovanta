@@ -44,8 +44,11 @@ def status(root: Path, as_json: bool) -> int:
         lines.append("editor: not open -> use ludovanta commands (batchmode).")
     lines.append("unity mcp package (com.unity.ai.assistant): " +
                  ("installed" if has_mcp else "not installed - live mode via MCP is unavailable"))
+    from .codex import find_codex
+    codex = find_codex(root)
+    lines.append(f"codex cli: {codex}" if codex else "codex cli: not found - tasks for agent 'codex' cannot be delegated here")
     data = {"project": str(root), "platformVersion": platform_version, "unityVersion": unity_version(root),
-            "unityEditor": unity, "editorOpen": is_open, "mode": mode, "mcpPackage": has_mcp}
+            "unityEditor": unity, "editorOpen": is_open, "mode": mode, "mcpPackage": has_mcp, "codex": codex}
     return finish(mode, EXIT_OK, lines, data, as_json)
 
 

@@ -287,3 +287,83 @@ def test_plan_dir_from_config(game):
     write(game / "ludovanta.json", json.dumps({"planDir": "Docs/Plan"}))
     cli(game, "init")
     assert (game / "Docs/Plan/tasks").is_dir()
+
+
+# --- briefs ----------------------------------------------------------------------------------------
+
+def test_session_brief(planned):
+    write(planned / "plan/goal.md", "# Такси\n")
+    write(planned / "plan/milestones/M1.md", "---\nid: M1\ntitle: Driving\n---\n\n## Done when\n\n- Car drives a block\n")
+    write(planned / "plan/handoff.md", "# Handoff\n\nThe user wants a softer camera.\n")
+    code, out = cli(planned, "brief")
+    assert code == 0, out
+    assert "plan: Такси | fidelity: not chosen | 40% done, 10% in review" in out
+    assert "current milestone: M1 Driving (plan/milestones/M1.md)\n  - Car drives a block" in out
+    assert "waiting for the user's review: T-002 Task T-002" in out
+    assert "HANDOFF (plan/handoff.md" in out and "softer camera" in out
+
+
+def test_task_brief_has_design_card_and_dependency_handoffs(planned):
+    write(planned / "plan/design.md", "---\nfidelity: stylized\n---\n\n# Design\n\n## Game feel\n\n| Brake | squeal |\n")
+    card = planned / "plan/tasks/T-001.md"
+    write(card, read(card) + "\n## Handoff\n\nCarController.Brake() exists.\n\n## Log\n\n- old\n")
+    code, out = cli(planned, "brief", "T-003")
+    assert code == 0, out
+    assert "TASK BRIEF T-003: Task T-003" in out and "fidelity: stylized" in out
+    assert "=== DESIGN (plan/design.md) ===\n# Design" in out and "fidelity: stylized\n---" not in out
+    assert "=== TASK CARD (plan/tasks/T-003.md) ===" in out
+    assert "T-001 Task T-001 (done):\n  CarController.Brake() exists." in out and "- old" not in out
+    assert "T-002 Task T-002 (review):\n  (no handoff)" in out
+    assert "plan set T-003 --status review" in out
+
+
+# --- closing a plan --------------------------------------------------------------------------------
+
+def test_close_refuses_unfinished_tasks(planned):
+    code, out = cli(planned, "close")
+    assert code == 1, out
+    assert out.startswith("PLAN_NOT_COMPLETE: 4 task(s)")
+    assert (planned / "plan/tasks/T-003.md").is_file()
+
+
+def test_close_archives_and_numbering_continues(game):
+    write(game / "plan/goal.md", "# Вертикальный срез\n")
+    write(game / "plan/design.md", "---\nfidelity: high\n---\n")
+    write(game / "plan/handoff.md", "notes\n")
+    milestone(game, "M1", "Driving")
+    task(game, "T-001", status="done", attempts=2)
+    task(game, "T-002", status="dropped")
+    assert "PLAN_COMPLETE" in cli(game)[1]
+    code, out = cli(game, "close")
+    assert code == 0, out
+    archive = game / "plan/archive/01-вертикальный-срез"
+    assert out.startswith("PLAN_CLOSED: archived 2 task(s) to plan/archive/01-вертикальный-срез/")
+    assert sorted(p.name for p in (archive / "tasks").iterdir()) == ["T-001.md", "T-002.md"]
+    assert (archive / "milestones/M1.md").is_file() and (archive / "goal.md").is_file()
+    assert (archive / "handoff.md").is_file() and not (game / "plan/handoff.md").exists()
+    summary = read(archive / "SUMMARY.md")
+    assert "1 done, 1 dropped" in summary and "failed attempts: 2" in summary and "## Retrospective" in summary
+    assert (game / "plan/design.md").is_file(), "the design lives across plans"
+    assert not list((game / "plan/tasks").iterdir())
+
+    cli(game, "init", "--title", "Next")
+    assert "# Next" in read(game / "plan/goal.md")
+    assert "MILESTONE_ADDED: M2" in cli(game, "add-milestone", "--title", "More")[1]
+    assert "TASK_ADDED: T-003" in cli(game, "add-task", "--milestone", "M2", "--title", "x")[1]
+    code, out = cli(game, "check")
+    assert code == 0 and "PLAN_OK: 1 milestone(s), 1 task(s)" in out, out
+
+
+def test_close_carries_unfinished_tasks(planned):
+    code, out = cli(planned, "close", "--carry")
+    assert code == 0, out
+    assert "archived 2 task(s)" in out and "carried 4 unfinished task(s)" in out
+    archive = planned / "plan/archive/01-plan"
+    assert sorted(p.name for p in (archive / "tasks").iterdir()) == ["T-001.md", "T-005.md"]
+    left = sorted(p.name for p in (planned / "plan/tasks").iterdir())
+    assert left == ["T-002.md", "T-003.md", "T-004.md", "T-006.md"]
+    assert (planned / "plan/milestones/M1.md").is_file() and (archive / "milestones/M1.md").is_file()
+    assert cli(planned, "check")[0] == 0, "dependencies on archived tasks count as met"
+    _, out = cli(planned, "next", "--json")
+    assert "T-003" in [t["id"] for t in json.loads(out)["tasks"]]
+    assert "T-001 Task T-001 (archived):" in cli(planned, "brief", "T-003")[1]

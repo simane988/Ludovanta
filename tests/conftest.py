@@ -79,18 +79,28 @@ def origin(copy_platform) -> tuple[Path, str]:
     return repo, repo.as_uri()
 
 
+def _launcher(folder: Path, script: Path) -> Path:
+    """An executable that runs a Python test script, like a real tool on PATH (.cmd shim on Windows)."""
+    if IS_WINDOWS:
+        launcher = folder / f"{script.stem}.cmd"
+        write(launcher, f'@"{sys.executable}" -B "{script}" %*\r\n')
+    else:
+        launcher = folder / f"{script.stem}.sh"
+        write(launcher, f'#!/bin/sh\nexec "{sys.executable}" -B "{script}" "$@"\n')
+        launcher.chmod(0o755)
+    return launcher
+
+
 @pytest.fixture
 def fake_unity_env(tmp_path) -> dict:
     """Env that points Ludovanta at tests/fake_unity.py instead of a real Unity (mode via FAKE_UNITY_MODE)."""
-    script = TESTS / "fake_unity.py"
-    if IS_WINDOWS:
-        launcher = tmp_path / "fake_unity.cmd"
-        write(launcher, f'@"{sys.executable}" -B "{script}" %*\r\n')
-    else:
-        launcher = tmp_path / "fake_unity.sh"
-        write(launcher, f'#!/bin/sh\nexec "{sys.executable}" -B "{script}" "$@"\n')
-        launcher.chmod(0o755)
-    return {"UNITY_EDITOR_PATH": str(launcher)}
+    return {"UNITY_EDITOR_PATH": str(_launcher(tmp_path, TESTS / "fake_unity.py"))}
+
+
+@pytest.fixture
+def fake_codex_env(tmp_path) -> dict:
+    """Env that points Ludovanta at tests/fake_codex.py instead of the Codex CLI (mode via FAKE_CODEX_MODE)."""
+    return {"CODEX_PATH": str(_launcher(tmp_path, TESTS / "fake_codex.py"))}
 
 
 _HOLDER = r"""

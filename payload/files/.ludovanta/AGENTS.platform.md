@@ -19,7 +19,9 @@ On Windows use `python` (or `py -3`) if `python3` is not available. Every comman
 | `compile` | Compile the project in batchmode, list compiler errors as `path:line:col CODE message` |
 | `test [--platform EditMode\|PlayMode] [--filter X] [--category Y]` | Run tests, list failures |
 | `validate-assets [--roots Assets ...]` | Missing/orphan `.meta` files and duplicate GUIDs (no Unity needed) |
-| `plan [status\|check\|next\|add-task\|set\|fail ...]` | Project plan: progress, next tasks, task cards (skill `ludovanta-plan`) |
+| `plan [status\|check\|next\|brief\|add-task\|set\|fail\|close ...]` | Project plan: progress, next tasks, task cards, briefs for fresh sessions and executors, closing a finished plan (skill `ludovanta-plan`) |
+| `codex run T-xxx` / `codex image "..." --out <file>` | Codex CLI as an executor of small tasks and as a reference image generator (skill `ludovanta-codex`) |
+| `hook session-start\|stop` | Called by the Claude Code hooks Ludovanta installs; not for manual use |
 | `update [--ref vX.Y.Z] [--dry-run]` | Update the platform itself (skill `ludovanta-platform-update`) |
 
 Exit codes (all commands):
@@ -61,6 +63,16 @@ that feels like a game in the first minute and looks as polished as the fidelity
   visuals from code.
 - A critic reviews the plan before the user sees it and the first playable before it is reported
   (skill `ludovanta-design-review`). Use it too when the user says the game is boring or raw.
+
+## Context: the plan is the memory, sessions are disposable
+
+Long sessions get expensive: every step re-sends the whole context. With a plan, the session that
+talks to the user is the orchestrator and gives each task to an executor with a fresh context (a
+subagent or Codex), then reads its short report (skill `ludovanta-plan`, "Running the plan").
+Decisions live in the plan files, not in the chat. At the end of a milestone in a long session,
+write `plan/handoff.md` and ask the user to type `/clear`; the next session starts from
+`plan brief`. In Claude Code, Ludovanta hooks load the brief at session start and ask for the
+handoff when the context grows large.
 
 ## Tasks: agree on the result, report against it, stop instead of looping
 

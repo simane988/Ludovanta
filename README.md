@@ -18,10 +18,12 @@ Unity Hub. Работает на Windows, macOS и Linux.
 <project>/
   .ludovanta/                           # принадлежит платформе, заменяется целиком при обновлении
     AGENTS.platform.md                  #   инструкции для агентов (режимы LIVE/HEADLESS, правила, коды выхода)
-    ludovanta.py                        #   единая точка входа: status | compile | test | validate-assets | update
+    ludovanta.py                        #   единая точка входа: status | compile | test | validate-assets | plan | codex | update
     ludovanta_lib/                      #   реализация команд
+    hook.sh                             #   запуск хуков Claude Code (ищет Python 3.9+)
     lock.json                           #   установленная версия + хэши всех файлов платформы
   .claude/skills/ludovanta-*/SKILL.md   # скиллы платформы (папки для скиллов настраиваются)
+  .claude/settings.json                 # + хуки Ludovanta (SessionStart, Stop), остальные настройки ваши
   AGENTS.md, CLAUDE.md                  # + управляемый блок ludovanta:managed, остальной текст ваш
   .gitignore, .gitattributes            # + управляемый блок ludovanta:managed
   ludovanta.json                        # ваш: откуда и какую версию платформы брать
@@ -38,6 +40,10 @@ python3 .ludovanta/ludovanta.py test [--platform EditMode|PlayMode] [--filter X]
 python3 .ludovanta/ludovanta.py validate-assets   # .meta / GUID без запуска Unity
 python3 .ludovanta/ludovanta.py plan              # план проекта: прогресс, задачи на проверке, следующие задачи
 python3 .ludovanta/ludovanta.py plan next|check|init|add-milestone|add-task|set|fail
+python3 .ludovanta/ludovanta.py plan brief [T-001]   # сводка для новой сессии или для исполнителя задачи
+python3 .ludovanta/ludovanta.py plan close [--carry] # закрыть выполненный план в plan/archive/
+python3 .ludovanta/ludovanta.py codex run T-001      # отдать задачу Codex CLI
+python3 .ludovanta/ludovanta.py codex image "описание" --out Art/References/hero.png   # референс через Codex
 python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 ```
 
@@ -53,7 +59,8 @@ python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 | `ludovanta-design-review` | критик качества игры: план перед показом пользователю, первая играбельная версия, конец майлстоуна, «почему скучно» |
 | `ludovanta-unity-compile` | после изменений C#/asmdef/пакетов, разбор ошибок компиляции, live-режим через Unity MCP |
 | `ludovanta-unity-test` | запуск и написание EditMode/PlayMode тестов, настройка тестовых asmdef |
-| `ludovanta-plan` | планирование и декомпозиция, прогресс, работа по карточкам задач, остановка после 3 неудачных попыток |
+| `ludovanta-plan` | планирование и декомпозиция, прогресс, оркестратор и исполнители задач, handoff и новые сессии, закрытие плана, остановка после 3 неудачных попыток |
+| `ludovanta-codex` | Codex CLI как исполнитель небольших задач (`agent: codex`) и генератор картинок-референсов |
 | `ludovanta-unity-assets` | создание/перенос/удаление ассетов, .meta и GUID, правила для сцен и префабов |
 | `ludovanta-platform-update` | обновление платформы, разбор конфликтов в файлах платформы |
 
@@ -66,7 +73,9 @@ python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 plan/goal.md              # что делаем, что входит и не входит, когда готово
 plan/design.md            # как игра играется, ощущается и выглядит; в заголовке `fidelity`
 plan/milestones/M1.md     # майлстоуны по порядку
-plan/tasks/T-001.md       # одна карточка на задачу
+plan/tasks/T-001.md       # одна карточка на задачу; раздел `## Handoff` пишет исполнитель для следующих задач
+plan/handoff.md           # сводка для следующей сессии: где мы, что дальше, что сказал пользователь
+plan/archive/01-<план>/   # закрытые планы с SUMMARY.md; команда `plan` их не читает
 ```
 
 У карточки есть заголовок (`id`, `title`, `milestone`, `status`, `agent`, `size`, `depends`, `attempts`) и
@@ -92,11 +101,48 @@ greybox. У задач с геймплеем есть критерии ощущ�
 Распределение между агентами задаёт поле `agent` (`claude`, `codex`, `any` или человек), а
 `plan next --agent codex` выдаёт задачи, готовые для конкретного агента.
 
+### Длинные планы и контекст
+
+Сессия, которая говорит с пользователем, работает как оркестратор: каждую задачу она отдаёт исполнителю
+со свежим контекстом (субагенту Claude или Codex) и читает только его короткий отчёт. Исполнитель получает
+всё нужное одной командой `plan brief T-xxx`: дизайн, карточку, handoff зависимостей и правила. Поэтому
+контекст оркестратора растёт на килобайты за задачу, а не на весь написанный код.
+
+Решения хранятся в файлах плана, а не в чате, так что новая сессия ничего не теряет. Хуки Claude Code,
+которые ставит Ludovanta:
+
+- **SessionStart** (новая сессия, `/clear`, компрессия): кладёт в контекст `plan brief` и `plan/handoff.md`;
+- **Stop** (после каждого ответа): если только что закрыта веха и контекст больше 100k токенов (или закрыта
+  любая задача при контексте больше 300k), просит агента записать `plan/handoff.md` и предложить
+  пользователю `/clear`. Пороги: `ludovanta.json` → `"handoff": {"milestoneTokens": 100000, "taskTokens": 300000}`.
+
+Сам сбросить контекст хук не может, поэтому `/clear` набирает пользователь. После этого достаточно
+написать «продолжай». Отключить хуки: `"claudeHooks": false` в `ludovanta.json` и `update`.
+
+### Когда план выполнен
+
+`plan` пишет PLAN_COMPLETE. `plan close` переносит `goal.md`, `handoff.md`, майлстоуны и задачи в
+`plan/archive/NN-<название>/` и пишет там `SUMMARY.md` (статистика и место для ретроспективы).
+`design.md` остаётся: он живёт всю жизнь игры. Нумерация задач и майлстоунов продолжается, задачи
+закрытых планов считаются выполненными зависимостями. Незакрытые задачи можно перенести в следующий
+план (`--carry`). Следующая итерация начинается с дизайна (скилл `ludovanta-game-design`), потом
+`plan init --title "..."`.
+
+### Codex
+
+Codex CLI подключается как второй агент: исполнитель небольших задач (`agent: codex`) и генератор
+картинок-референсов по подписке ChatGPT (встроенный `$imagegen`). `status` показывает, найден ли
+`codex`. `codex run T-xxx` передаёт задачу в `codex exec` через файл с брифом (без длинных аргументов
+командной строки, которые ломает cmd.exe) и печатает короткий отчёт и изменённые файлы. Настройки:
+`ludovanta.json` → `"codex": {"sandbox": "workspace-write", "model": "..."}`, путь к исполняемому файлу:
+`ludovanta.local.json` → `"codexPath"` или `CODEX_PATH`. Чтобы Codex видел скиллы платформы, добавьте
+`.agents/skills` в `skillTargets`.
+
 ## Установка в проект
 
 ```
 git clone <url-этого-репозитория> ludovanta
-python3 ludovanta/install.py --project /path/to/MyGame --source <url-этого-репозитория> --ref v0.1.1
+python3 ludovanta/install.py --project /path/to/MyGame --source <url-этого-репозитория> --ref v0.1.2
 ```
 
 `--source` и `--ref` записываются в `ludovanta.json` проекта и дальше используются для обновлений.
@@ -138,6 +184,9 @@ python3 .ludovanta/ludovanta.py update --ref v0.2.0    # на другую ве�
    платформы, а установщик сохраняет CRLF/LF, BOM и байты в ваших общих файлах как есть.
 7. **Никакого мусора от Python.** Команды не создают `__pycache__` в `.ludovanta/`, а на всякий случай он
    добавлен в `.gitignore`-блок.
+8. **Хуки в `.claude/settings.json`.** Платформе принадлежат только обработчики, которые запускают
+   `.ludovanta/hook.sh`: при обновлении они удаляются и добавляются заново, остальные настройки и хуки не
+   трогаются. Битый JSON останавливает установку до записи.
 
 ### Как кастомизировать, не ломая обновления
 

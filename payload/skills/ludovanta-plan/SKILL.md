@@ -1,6 +1,6 @@
 ---
 name: ludovanta-plan
-description: Plan the game and work by task cards. Use when the user asks to plan, break a goal down into tasks, show progress or "how much is done", pick the next task, or work on a task by id (T-001); also when a task fails repeatedly or the user rejects a result. Covers the plan/ folder, task cards with acceptance criteria, task statuses, splitting work between agents (Claude, Codex), and the stop-after-3-failed-attempts rule. For a new game or a big feature, the design pass (ludovanta-game-design) comes first.
+description: Plan the game and work by task cards. Use when the user asks to plan, break a goal down into tasks, show progress or "how much is done", pick the next task, continue the plan, or work on a task by id (T-001); also when a task fails repeatedly, the user rejects a result, a milestone is finished, the session context is large, or the plan is complete. Covers the plan/ folder, task cards with acceptance criteria, task statuses, running the plan as an orchestrator with one executor (subagent or Codex) per task, handoff and fresh sessions, closing a finished plan, and the stop-after-3-failed-attempts rule. For a new game or a big feature, the design pass (ludovanta-game-design) comes first.
 ---
 
 # Project plan and task cards
@@ -13,6 +13,8 @@ plan/goal.md              what we are building, in and out of scope, "done when"
 plan/design.md            fantasy, main verb, session walk-through, game feel, art direction, fidelity
 plan/milestones/M1.md     milestones in order
 plan/tasks/T-001.md       one task card per file
+plan/handoff.md           written before a fresh session: where we are, what is next
+plan/archive/01-<name>/   closed plans (goal, milestones, tasks, SUMMARY.md); not read by 'plan'
 ```
 
 ## Commands
@@ -26,6 +28,9 @@ python3 .ludovanta/ludovanta.py plan add-milestone --title "..."
 python3 .ludovanta/ludovanta.py plan add-task --milestone M1 --title "..." [--agent claude|codex|any] [--size S|M|L] [--depends T-001 ...]
 python3 .ludovanta/ludovanta.py plan set T-001 --status in-progress|review|done|blocked|dropped|todo [--agent ...]
 python3 .ludovanta/ludovanta.py plan fail T-001 "why the attempt failed"
+python3 .ludovanta/ludovanta.py plan brief                 # state + handoff, what a fresh session needs
+python3 .ludovanta/ludovanta.py plan brief T-001           # everything an executor needs for one task
+python3 .ludovanta/ludovanta.py plan close [--carry]       # archive a finished plan, numbering continues
 ```
 
 On Windows use `python` (or `py -3`) if `python3` is not available. `plan`, `plan check` and
@@ -60,10 +65,14 @@ One or two sentences: what the player gets.
 Car physics (T-004 is in review).
 
 ## Notes
+
+## Handoff
+Written by the executor when the task is finished: what exists now (files, scene objects,
+public API), decisions and gotchas the dependent tasks need. 'plan brief' passes it on.
 ```
 
 - Write the card text in the user's language (headings too, if the user prefers). Only the header
-  keys and the `- [ ]` checkbox syntax are fixed.
+  keys, the `- [ ]` checkbox syntax and the `## Handoff` heading are fixed.
 - Every checkbox in the body is an acceptance criterion. Criteria are observable: what the user sees
   in Play mode or on a screenshot, a test name, a number. Not "code is clean", not "works well".
   Two to five criteria per task.
@@ -74,8 +83,9 @@ Car physics (T-004 is in review).
 - `size`: S (under an hour of agent work), M (one to two hours), L (half a day). Split anything
   bigger.
 - `agent`: who should do it: `claude`, `codex`, `any`, or a person. Leave `any` unless the user
-  has a rule for this project, or the task clearly needs one agent's strengths. The user tunes
-  these rules over time from the attempts history.
+  has a rule for this project, or the task clearly needs one agent's strengths. `codex` fits small
+  (S), self-contained code tasks with clear criteria that need no Unity Editor or scene work (skill
+  `ludovanta-codex`). The user tunes these rules over time from the attempts history.
 - `status`: `todo` -> `in-progress` -> `review` (agent finished, waiting for the user) -> `done`
   (the user accepted). Also `blocked` and `dropped` (out of scope; excluded from progress).
 - Progress is weighted by size: S=1, M=2, L=4. Tasks in review are shown separately from done.
@@ -114,10 +124,62 @@ Car physics (T-004 is in review).
 Only one agent restructures the plan at a time (adds, splits or reorders tasks), in the main working
 copy. Agents working on tasks in other worktrees change only their own task card.
 
+## Running the plan: an orchestrator and one executor per task
+
+A plan runs for hours. If one session does every task itself, its context grows with every file it
+writes and reads, and each step re-sends all of it: a day of work reaches hundreds of thousands of
+tokens per step. So the session that talks to the user is the **orchestrator** and does not build
+the game itself. Each task goes to an **executor** with a fresh context, and only its short report
+comes back.
+
+Orchestrator, for each task (`plan next`, or the one the user named):
+
+1. Pick the executor by the card's `agent`: `codex` -> `ludovanta.py codex run T-xxx` (skill
+   `ludovanta-codex`); `claude` or `any` -> a subagent (Claude Code: the Agent tool, general-purpose).
+   Without subagents, do the task yourself (see "Working on a task") and rely on the handoff below
+   to keep the context small.
+2. Subagent prompt, nothing more: "You are the executor of Ludovanta task T-xxx in this Unity
+   project. Run `python3 .ludovanta/ludovanta.py plan brief T-xxx` (on Windows `python` or `py -3`)
+   and do the task by its rules." plus only what the card cannot know (the user's latest words about
+   this task). The brief carries the design, the card, the dependencies' handoffs and the rules.
+3. One executor at a time while the Unity Editor is open (LIVE): they share the Editor and its
+   compilation. Parallel executors only in their own git worktrees (HEADLESS).
+4. Read the report. Check the claims that matter cheaply: the card's ticked criteria, the compile
+   and test status, a screenshot for anything visible. An executor's report is not proof.
+5. If the executor came back with a question, ask the user, then start a new executor with the
+   answer. If it failed, `plan fail` and start a new one with a different approach.
+6. At the end of a milestone: the critic (skill `ludovanta-design-review`), then one report to the
+   user and a playtest request (see "Working on a task", steps 5-7).
+
+User feedback goes into the plan, not only into the conversation: a new criterion on a card, a fix
+task, or a line in `design.md` (art and feel preferences). Then the next executor sees it.
+
+## Context and handoff
+
+The plan files are the memory, so a fresh session loses nothing that was written down. In Claude
+Code, Ludovanta hooks print `plan brief` (state plus `plan/handoff.md`) into every new session,
+after `/clear` and after compaction. After each reply, a hook checks the context size: when a
+milestone was just finished and the context is over `handoff.milestoneTokens` (default 100000 in
+`ludovanta.json`), or any task was finished over `handoff.taskTokens` (default 300000), it asks for
+a handoff.
+
+Handoff (also do it unasked at the end of a milestone in a long session, and in agents without hooks):
+
+1. Durable decisions go where they belong: `design.md` (the user's art and feel preferences),
+   task cards (new criteria, `## Handoff`).
+2. Overwrite `plan/handoff.md`, short, in the user's language: where we are; what the user said
+   that is not recorded elsewhere; what is next (task ids) and how the user likes to work;
+   open questions. Not a history of the session.
+3. Finish the report with one line asking the user to type `/clear` and then "continue" (for
+   example «Набери /clear, затем «продолжай»»). Do not start the next task in the same session.
+   Hooks cannot clear the context themselves; the user's `/clear` is the one manual step. In an
+   agent without hooks, the new session starts with `plan brief`.
+
 ## Working on a task
 
-1. Pick: the task the user named, or the first one from `plan next --agent <you>`. Read the card,
-   its dependencies, `goal.md` and `design.md` (the game feel and art direction the task must meet).
+1. Pick: the task the user named, or the first one from `plan next --agent <you>`. Read
+   `plan brief T-xxx`: the card, its dependencies' handoffs, `goal.md` and `design.md` (the game
+   feel and art direction the task must meet).
 2. If the criteria are missing or ambiguous, propose criteria and ask the user before starting.
    Otherwise start without asking: the user prefers autonomy and a result to review.
 3. `plan set T-xxx --status in-progress`.
@@ -151,6 +213,26 @@ python3 .ludovanta/ludovanta.py plan fail T-xxx "what failed and why"
   get another 3 attempts.
 - Compile errors and failing tests while you are still working are not failed attempts: they are
   normal iteration.
+
+## When the plan is complete
+
+`plan` prints PLAN_COMPLETE when every task is `done` or `dropped`. A plan is one iteration; the game
+and `design.md` go on.
+
+1. Tasks still in review: ask the user to accept them first. Tasks left over: ask whether to drop
+   them or carry them into the next plan (`plan close --carry`).
+2. `plan close` moves `goal.md`, `handoff.md`, the milestones and the tasks to
+   `plan/archive/NN-<title>/` and writes `SUMMARY.md` there. Task and milestone numbers continue in
+   the next plan; tasks of closed plans count as done dependencies.
+3. Fill the `## Retrospective` in `SUMMARY.md` with the user: what the playtest showed, what was fun
+   and what was boring, which tasks failed and why, what to change in how agents work (sizes, the
+   `agent` field).
+4. The next iteration starts with the design (skill `ludovanta-game-design`, "Next iteration"), then
+   `plan init --title "..."` for the new `goal.md`, then planning as above.
+5. Commit the closed plan and the new plan separately.
+
+Older plans are read only when needed (for example "why did we do X"): they are history, not
+context for every session.
 
 ## Showing progress
 

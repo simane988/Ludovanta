@@ -16,6 +16,7 @@ markdown in any language; every checkbox line ('- [ ] ...') in it is an acceptan
 from __future__ import annotations
 
 import re
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -121,6 +122,7 @@ class Plan:
         self.errors: list[str] = []
         self.warnings: list[str] = []
         self.fidelity = ""
+        self.archived_ids: set[str] = set()   # tasks of closed plans count as done dependencies
         if self.exists:
             self._load()
             self._load_design()
@@ -192,10 +194,13 @@ class Plan:
                                      "acceptance criteria are not ticked")
             self.tasks.append(task)
 
+        for a in self.archives():
+            if (a / "tasks").is_dir():
+                self.archived_ids |= {p.stem for p in (a / "tasks").iterdir() if TASK_FILE_RX.match(p.name)}
         by_id = self.by_id
         for t in self.tasks:
             for d in t["depends"]:
-                if d not in by_id:
+                if d not in by_id and d not in self.archived_ids:
                     self.errors.append(f"{t['file']}: depends on unknown task '{d}'")
         self.errors += [f"dependency cycle: {' -> '.join(c)}" for c in self._cycles()]
 
@@ -249,7 +254,7 @@ class Plan:
                 continue
             if agent and t["agent"] not in (agent.lower(), "any"):
                 continue
-            if all(by_id.get(d, {}).get("status") in DEPENDENCY_MET for d in t["depends"]):
+            if all(d in self.archived_ids or by_id.get(d, {}).get("status") in DEPENDENCY_MET for d in t["depends"]):
                 out.append(t)
         return sorted(out, key=lambda t: (order.get(t["milestone"], 1 << 30), _natural(t["id"])))
 
@@ -279,10 +284,27 @@ class Plan:
             raise LudovantaError(f"{self.rel(path)}: {card.error}")
         return card
 
+    def archives(self) -> list[Path]:
+        folder = self.dir / "archive"
+        return sorted((p for p in folder.iterdir() if p.is_dir()), key=lambda p: p.name) if folder.is_dir() else []
+
     def next_id(self, sub: str, rx, prefix: str, width: int) -> str:
-        folder = self.dir / sub
-        numbers = [int(m.group(1)) for p in folder.iterdir() if (m := rx.match(p.name))] if folder.is_dir() else []
+        """Numbers continue across archived plans, so 'T-012' in a commit message stays unambiguous."""
+        numbers = []
+        for folder in [self.dir / sub] + [a / sub for a in self.archives()]:
+            if folder.is_dir():
+                numbers += [int(m.group(1)) for p in folder.iterdir() if (m := rx.match(p.name))]
         return f"{prefix}{max(numbers, default=0) + 1:0{width}d}"
+
+    def complete(self) -> bool:
+        return bool(self.tasks) and all(t["status"] in ("done", "dropped") for t in self.tasks)
+
+    def current_milestone(self) -> dict | None:
+        """First milestone, in order, with work left; None when everything is done."""
+        for m in self.milestones:
+            if any(t["milestone"] == m["id"] and t["status"] not in ("done", "dropped") for t in self.tasks):
+                return m
+        return None
 
 
 # --- Output helpers ----------------------------------------------------------------------
@@ -341,9 +363,12 @@ def status(root: Path, as_json: bool) -> int:
     section(f"stopped after {plan.max_attempts} failed attempts, need the user's decision", stuck)
     ready = plan.ready()
     section("next (ready to start)", ready[:5])
+    if plan.complete():
+        lines.append("PLAN_COMPLETE: every task is done or dropped. Close the plan with 'ludovanta.py plan close' "
+                     "and start the next iteration (skill ludovanta-plan).")
     if plan.errors:
         lines.append(f"problems: {len(plan.errors)} - run 'ludovanta.py plan check'")
-    data = {"goal": title, "fidelity": plan.fidelity, "overall": overall, "milestones": milestones, "tasks": plan.tasks,
+    data = {"goal": title, "fidelity": plan.fidelity, "complete": plan.complete(), "overall": overall, "milestones": milestones, "tasks": plan.tasks,
             "next": [t["id"] for t in ready], "problems": plan.errors, "warnings": plan.warnings}
     return finish("PLAN", EXIT_OK, lines, data, as_json)
 
@@ -573,3 +598,217 @@ def fail_task(root: Path, task_id: str, reason: str) -> int:
     return finish("ATTEMPT_RECORDED", EXIT_OK, [
         f"ATTEMPT_RECORDED: {task_id} attempt {attempts} failed, {left} attempt(s) left before you must stop and ask.",
         "Before the next attempt, change the approach: do not repeat what already failed."])
+
+
+# --- Briefs: what a fresh session or an executor needs, in one short read ---------------------------
+
+HANDOFF_RX = re.compile(r"^##\s+handoff\b", re.IGNORECASE)
+DONE_WHEN_RX = re.compile(r"^##\s+(done when|готово)", re.IGNORECASE)
+BRIEF_DESIGN_LINES = 150
+BRIEF_HANDOFF_LINES = 80
+
+EXECUTOR_RULES = """EXECUTOR RULES
+- You work on this one task only. Read .ludovanta/AGENTS.platform.md first: modes, commands, report format.
+- Start with: python3 .ludovanta/ludovanta.py plan set {id} --status in-progress --agent <claude|codex>
+  (on Windows use python or py -3 if python3 is missing).
+- Meet every criterion, the feel criteria included, at the fidelity and art direction above. For anything the
+  player sees, capture the gameplay camera and look at it.
+- Verify: compile, the relevant tests, validate-assets. If a command returns EDITOR_OPEN and you have no Unity MCP
+  tools, do not work around it: write "not compiled, Editor open" in the report; the orchestrator verifies.
+- Tick the criteria you verified. Add or update a '## Handoff' section at the end of the card: what exists now
+  (files, scene objects, public API), decisions and gotchas the next tasks need. A few lines.
+- Then: plan set {id} --status review. If your own verification keeps failing, record it with 'plan fail'.
+- Do not edit other task cards, the plan structure, design.md, or anything listed under "Do not touch".
+- Your final message is the task report (What changed / How to check / Not done or uncertain / Next), at most
+  20 lines. The orchestrator reads it, not the user."""
+
+
+def _section(lines: list[str], rx) -> list[str]:
+    out = None
+    for line in lines:
+        if line.startswith("## "):
+            if out is not None:
+                break
+            if rx.match(line):
+                out = []
+                continue
+        elif out is not None:
+            out.append(line)
+    out = out or []
+    while out and not out[-1].strip():
+        out.pop()
+    while out and not out[0].strip():
+        out.pop(0)
+    return out
+
+
+def _clip(lines: list[str], limit: int, where: str) -> list[str]:
+    if len(lines) <= limit:
+        return lines
+    return lines[:limit] + [f"... {len(lines) - limit} more lines in {where}"]
+
+
+def _file_lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8-sig", errors="replace").replace("\r\n", "\n").rstrip("\n").split("\n")
+
+
+def _milestone_done_when(plan: Plan, milestone: dict) -> list[str]:
+    card = CardFile(plan.root / milestone["file"])
+    return _section(card.body, DONE_WHEN_RX) if not card.error else []
+
+
+def session_brief(root: Path) -> list[str] | None:
+    """Plan state plus plan/handoff.md: loaded at the start of every session, after /clear and after compaction."""
+    plan = Plan(root)
+    if not plan.exists:
+        return None
+    overall = plan.progress(plan.tasks)
+    title = plan.goal_title() or plan.rel(plan.dir) + "/"
+    lines = ["LUDOVANTA PLAN BRIEF (state of the project plan; the plan files are the shared memory)",
+             f"plan: {title} | fidelity: {plan.fidelity or 'not chosen'} | {overall['done']}% done"
+             + (f", {overall['review']}% in review" if overall["review"] else "")]
+    current = plan.current_milestone()
+    if current:
+        lines.append(f"current milestone: {current['id']} {current['title']} ({current['file']})")
+        lines += [f"  {line}" for line in _milestone_done_when(plan, current) if line.strip()]
+    for name, status in (("in progress", "in-progress"), ("waiting for the user's review", "review"),
+                         ("blocked", "blocked")):
+        tasks = [t for t in plan.tasks if t["status"] == status]
+        if tasks:
+            lines.append(f"{name}: " + "; ".join(f"{t['id']} {t['title']}" for t in tasks))
+    ready = plan.ready()[:3]
+    if ready:
+        lines.append("next: " + "; ".join(f"{t['id']} [{t['agent']}] {t['title']}" for t in ready))
+    if plan.complete():
+        lines.append("PLAN_COMPLETE: close it with 'plan close' and start the next iteration.")
+    handoff = plan.dir / "handoff.md"
+    if handoff.is_file():
+        lines += ["", f"HANDOFF ({plan.rel(handoff)}, written by the previous session):"]
+        lines += _clip(_file_lines(handoff), BRIEF_HANDOFF_LINES, plan.rel(handoff))
+    lines += ["", "You are the orchestrator of this plan: talk to the user, delegate each task to an executor "
+                  "(skill ludovanta-plan, 'Running the plan'). 'plan brief T-xxx' prints a task's brief."]
+    return lines
+
+
+def task_brief(root: Path, task_id: str) -> list[str]:
+    """Everything an executor needs for one task: game, fidelity, design, milestone, card, dependency handoffs."""
+    plan = Plan(root)
+    card = plan.card(task_id)
+    task = plan.by_id[task_id]
+    milestone = next((m for m in plan.milestones if m["id"] == task["milestone"]), None)
+    lines = [f"TASK BRIEF {task_id}: {task['title']}",
+             f"game: {plan.goal_title() or '-'} | fidelity: {plan.fidelity or 'not chosen'}"]
+    if milestone:
+        lines.append(f"milestone {milestone['id']}: {milestone['title']}")
+        lines += [f"  {line}" for line in _milestone_done_when(plan, milestone) if line.strip()]
+    design = plan.dir / "design.md"
+    if design.is_file():
+        design_lines = _file_lines(design)
+        start = next((i + 1 for i, line in enumerate(design_lines[1:], 1) if line.strip() == "---"), 0) \
+            if design_lines and design_lines[0].strip() == "---" else 0
+        design_lines = design_lines[start:]
+        while design_lines and not design_lines[0].strip():
+            design_lines.pop(0)
+        lines += ["", f"=== DESIGN ({plan.rel(design)}) ==="]
+        lines += _clip(design_lines, BRIEF_DESIGN_LINES, plan.rel(design))
+    lines += ["", f"=== TASK CARD ({task['file']}) ==="] + _file_lines(card.path)
+    handoffs = []
+    for dep_id in task["depends"]:
+        if dep_id in plan.by_id:
+            path, status = plan.root / plan.by_id[dep_id]["file"], plan.by_id[dep_id]["status"]
+        else:
+            found = [a / "tasks" / f"{dep_id}.md" for a in plan.archives() if (a / "tasks" / f"{dep_id}.md").is_file()]
+            if not found:
+                continue
+            path, status = found[-1], "archived"
+        dep_card = CardFile(path)
+        notes = _section(dep_card.body, HANDOFF_RX) if not dep_card.error else []
+        handoffs += [f"{dep_id} {dep_card.fields.get('title', '')} ({status}):"] + \
+                    ([f"  {n}" for n in notes] or ["  (no handoff)"])
+    if handoffs:
+        lines += ["", "=== HANDOFF FROM DEPENDENCIES ==="] + handoffs
+    lines += ["", EXECUTOR_RULES.format(id=task_id)]
+    return lines
+
+
+def brief(root: Path, task_id: str | None) -> int:
+    if task_id:
+        return finish("TASK_BRIEF", EXIT_OK, task_brief(root, task_id))
+    lines = session_brief(root)
+    if lines is None:
+        return _no_plan(Plan(root), False)
+    return finish("PLAN_BRIEF", EXIT_OK, lines)
+
+
+# --- Closing a plan: archive it, keep the numbering, start the next iteration -------------------------
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^\w]+", "-", text.lower()).strip("-")[:40].strip("-")
+
+
+def _summary(plan: Plan, archived: list[dict], carried: list[dict], title: str) -> str:
+    total = sum(SIZES[t["size"]] for t in archived if t["status"] != "dropped")
+    failed = sum(t["attempts"] for t in archived)
+    rows = [f"| {t['id']} | {t['title']} | {t['milestone']} | {t['status']} | {t['size']} | {t['agent']} | {t['attempts']} |"
+            for t in archived]
+    milestones = []
+    for m in plan.milestones:
+        mine = [t for t in archived if t["milestone"] == m["id"]]
+        if mine:
+            done = sum(1 for t in mine if t["status"] == "done")
+            milestones.append(f"- {m['id']} {m['title']}: {done}/{len(mine)} done")
+    text = [f"# {title}: summary", "", f"Closed: {date.today().isoformat()}", "",
+            f"Tasks: {len(archived)} ({sum(1 for t in archived if t['status'] == 'done')} done, "
+            f"{sum(1 for t in archived if t['status'] == 'dropped')} dropped), size points done: {total}, "
+            f"failed attempts: {failed}.", "", "## Milestones", ""] + milestones
+    if carried:
+        text += ["", "## Carried over to the next plan", ""] + [f"- {t['id']} {t['title']} ({t['status']})" for t in carried]
+    text += ["", "## Tasks", "", "| Task | Title | Milestone | Status | Size | Agent | Failed attempts |",
+             "|---|---|---|---|---|---|---|"] + rows
+    text += ["", "## Retrospective", "",
+             "<!-- Written by the agent with the user: what the playtest showed, what was fun, what was boring,",
+             "     what to change in the design and in how agents work (agent field, task sizes). -->", ""]
+    return "\n".join(text)
+
+
+def close(root: Path, carry: bool) -> int:
+    plan = Plan(root)
+    if not plan.exists:
+        return _no_plan(plan, False)
+    if plan.errors:
+        return finish("PLAN_INVALID", EXIT_PROBLEMS, [f"PLAN_INVALID: fix the plan first ('plan check'), "
+                                                      f"{len(plan.errors)} problem(s)."])
+    unfinished = [t for t in plan.tasks if t["status"] not in ("done", "dropped")]
+    if unfinished and not carry:
+        return finish("PLAN_NOT_COMPLETE", EXIT_PROBLEMS, [
+            f"PLAN_NOT_COMPLETE: {len(unfinished)} task(s) are not done or dropped:"]
+            + [f"  {_task_line(t)} - {t['status']}" for t in unfinished]
+            + ["Ask the user: accept them (done), drop them (dropped), or carry them into the next plan (--carry)."])
+
+    title = plan.goal_title() or "Plan"
+    number = len(plan.archives()) + 1
+    dest = plan.dir / "archive" / (f"{number:02d}-{_slug(title)}".rstrip("-") or f"{number:02d}")
+    (dest / "tasks").mkdir(parents=True)
+    (dest / "milestones").mkdir()
+    archived = [t for t in plan.tasks if t not in unfinished]
+    for t in archived:
+        shutil.move(str(plan.root / t["file"]), str(dest / "tasks" / Path(t["file"]).name))
+    keep_milestones = {t["milestone"] for t in unfinished}
+    for m in plan.milestones:
+        src = plan.root / m["file"]
+        if m["id"] in keep_milestones:
+            shutil.copy2(str(src), str(dest / "milestones" / src.name))
+        else:
+            shutil.move(str(src), str(dest / "milestones" / src.name))
+    for name in ("goal.md", "handoff.md"):
+        if (plan.dir / name).is_file():
+            shutil.move(str(plan.dir / name), str(dest / name))
+    summary = dest / "SUMMARY.md"
+    summary.write_text(_summary(plan, archived, unfinished, title), encoding="utf-8", newline="\n")
+
+    lines = [f"PLAN_CLOSED: archived {len(archived)} task(s) to {plan.rel(dest)}/"
+             + (f", carried {len(unfinished)} unfinished task(s) into the next plan" if unfinished else ""),
+             f"next: 1) write the retrospective in {plan.rel(summary)} with the user;",
+             "      2) update design.md with what the playtest showed (skill ludovanta-game-design, 'Next iteration');",
+             "      3) 'plan init --title \"...\"' creates the new goal.md; task and milestone numbers continue."]
+    return finish("PLAN_CLOSED", EXIT_OK, lines)

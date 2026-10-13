@@ -1,6 +1,6 @@
 ---
 name: ludovanta-game-design
-description: Design the game before planning or building it - fantasy, main verb, core loop, session walk-through, game feel, art direction and the graphics fidelity level - and keep it in plan/design.md. Use when the user describes a new game or a big new feature, before breaking work down with ludovanta-plan, when plan/design.md is missing, and when the user says the game feels raw, boring, empty or "not like a game".
+description: Design the game before planning or building it - fantasy, main verb, core loop, session walk-through, game feel, art direction and the graphics fidelity level - and keep it in plan/design.md. Use when the user describes a new game or a big new feature, before breaking work down with ludovanta-plan, when plan/design.md is missing, when a plan was closed and the next iteration starts, and when the user says the game feels raw, boring, empty or "not like a game".
 ---
 
 # Game design: make it a game, not a set of working mechanics
@@ -77,6 +77,11 @@ short: a page or two, decisions rather than essays.
 How to build feel, art and audio in Unity without bought assets: [unity-craft.md](unity-craft.md).
 Read it before writing the art direction and the game feel table.
 
+Visual references make the art direction concrete. If the user gave none and Codex is available
+(`ludovanta.py status`), offer to generate a few (skill `ludovanta-codex`, "Reference images"): the
+hero, the first area, the main verb in action. Link the ones the user picks in the art direction and
+write what to take from each, because executors read the design, not the pictures.
+
 If the design is `discuss`: after one or two rounds ask exactly «Нужна ещё итерация дизайна или
 фиксируем дизайн?» (in the user's language) and continue to planning only after the user fixes it.
 If `one-shot`: do not ask for approval of the design, show it together with the plan.
@@ -85,6 +90,21 @@ If `one-shot`: do not ask for approval of the design, show it together with the 
 
 Then follow `ludovanta-plan`: milestones and tasks are derived from `design.md`, and the plan is
 reviewed by a critic (`ludovanta-design-review`, checkpoint "plan") before the user sees it.
+
+## Next iteration
+
+When a plan is closed (`plan close`, skill `ludovanta-plan`), the next one starts here, not from a
+blank page:
+
+1. Read the closed plan's `SUMMARY.md` (retrospective, playtest notes) and the current `design.md`.
+2. Ask the user what the next iteration is for, in one message: a new chunk of content, deeper
+   mechanics, polish and fidelity, a new platform. Offer your recommendation from the
+   retrospective (what was boring is usually the first target).
+3. Update `design.md`: what changes in the loop, the session walk-through, the feel table, the art
+   direction; keep a short `## Changes` list at the end with the date, so the history of decisions
+   stays readable. Raise the fidelity only if the user asks for it.
+4. Then plan the iteration as usual (critic included). Its first milestone is again something the
+   user can play and feel a difference in.
 
 ## When the user says it is boring or raw
 

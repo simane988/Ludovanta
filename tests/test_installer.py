@@ -23,7 +23,8 @@ def test_installs_platform_files(installed_project):
     for rel in (".ludovanta/ludovanta.py", ".ludovanta/ludovanta_lib/commands.py", ".ludovanta/AGENTS.platform.md",
                 ".claude/skills/ludovanta-unity-compile/SKILL.md", ".claude/skills/ludovanta-platform-update/SKILL.md",
                 ".claude/skills/ludovanta-game-design/SKILL.md", ".claude/skills/ludovanta-game-design/unity-craft.md",
-                ".claude/skills/ludovanta-design-review/SKILL.md"):
+                ".claude/skills/ludovanta-design-review/SKILL.md", ".claude/skills/ludovanta-codex/SKILL.md",
+                ".ludovanta/hook.sh", ".ludovanta/ludovanta_lib/hooks.py", ".ludovanta/ludovanta_lib/codex.py"):
         assert (p / rel).is_file(), rel
     assert lock(p)["version"] == VERSION
     assert not list(p.rglob("__pycache__"))
@@ -160,6 +161,56 @@ def test_skill_targets_added_and_removed(installed_project):
     assert code == 0, out
     assert not (p / ".claude/skills/ludovanta-unity-test").exists()
     assert (p / ".claude/skills/my-skill/SKILL.md").is_file(), "user skill survives target cleanup"
+
+
+# --- Claude Code hooks in .claude/settings.json ---------------------------------------------------
+
+def ludovanta_commands(project):
+    settings = json.loads(read(project / ".claude/settings.json"))
+    return {event: [h["command"] for g in groups for h in g["hooks"] if ".ludovanta/hook.sh" in h["command"]]
+            for event, groups in settings.get("hooks", {}).items()}
+
+
+def test_hooks_installed(installed_project):
+    assert ludovanta_commands(installed_project) == {
+        "SessionStart": ['sh "$CLAUDE_PROJECT_DIR/.ludovanta/hook.sh" session-start'],
+        "Stop": ['sh "$CLAUDE_PROJECT_DIR/.ludovanta/hook.sh" stop']}
+    assert (installed_project / ".ludovanta/hook.sh").is_file()
+
+
+def test_hooks_keep_user_settings_and_are_idempotent(project):
+    user_hook = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}
+    write(project / ".claude/settings.json", json.dumps(
+        {"permissions": {"allow": ["Bash(git status)"]}, "hooks": {"PreToolUse": [user_hook],
+                                                                   "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]}},
+        indent=4) + "\n")
+    assert install(project)[0] == 0
+    settings = json.loads(read(project / ".claude/settings.json"))
+    assert settings["permissions"] == {"allow": ["Bash(git status)"]}
+    assert settings["hooks"]["PreToolUse"] == [user_hook]
+    assert [h["command"] for g in settings["hooks"]["Stop"] for h in g["hooks"]] == [
+        "echo stop", 'sh "$CLAUDE_PROJECT_DIR/.ludovanta/hook.sh" stop']
+    before = read(project / ".claude/settings.json")
+    code, out = install(project)
+    assert code == 0 and "(Ludovanta hooks)" not in out, out
+    assert read(project / ".claude/settings.json") == before
+
+
+def test_hooks_disabled_by_config(installed_project):
+    p = installed_project
+    cfg = json.loads(read(p / "ludovanta.json"))
+    write(p / "ludovanta.json", json.dumps({**cfg, "claudeHooks": False}, indent=2) + "\n")
+    code, out = install(p)
+    assert code == 0, out
+    assert ludovanta_commands(p) == {}
+
+
+def test_invalid_settings_json_stops_install(project):
+    write(project / ".claude/settings.json", "{ broken")
+    code, out = install(project)
+    assert code == 2, out
+    assert ".claude/settings.json is not valid JSON" in out
+    assert not (project / ".ludovanta").exists(), "nothing written"
 
 
 @pytest.mark.parametrize("target", ["../outside", "/abs/path", "C:/abs", ""])

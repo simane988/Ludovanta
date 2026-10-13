@@ -7,7 +7,9 @@ Managed by Ludovanta - do not edit in a game project, changes are overwritten on
     python3 .ludovanta/ludovanta.py compile           # batchmode compile, compact compiler errors
     python3 .ludovanta/ludovanta.py test [--platform EditMode|PlayMode] [--filter X] [--category Y]
     python3 .ludovanta/ludovanta.py validate-assets   # .meta / GUID consistency, no Unity needed
-    python3 .ludovanta/ludovanta.py plan [status|check|next|init|add-milestone|add-task|set|fail]
+    python3 .ludovanta/ludovanta.py plan [status|check|next|brief|init|add-milestone|add-task|set|fail|close]
+    python3 .ludovanta/ludovanta.py codex run T-001 | codex image --out Art/References/x.png "description"
+    python3 .ludovanta/ludovanta.py hook session-start|stop    # called by Claude Code hooks (stdin: hook JSON)
     python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 
 Exit codes: 0 ok, 1 project problems, 2 environment failure, 3 project open in Unity Editor, 4 timeout.
@@ -83,6 +85,26 @@ def build_parser() -> argparse.ArgumentParser:
     q = plan.add_parser("fail", help="record a failed attempt; stops the agent after maxAttempts (default 3)")
     q.add_argument("task")
     q.add_argument("reason", help="why the attempt failed")
+    q = plan.add_parser("brief", help="what a fresh session (no task) or an executor (task id) needs, in one read")
+    q.add_argument("task", nargs="?")
+    q = plan.add_parser("close", help="archive a finished plan to plan/archive/, numbering continues")
+    q.add_argument("--carry", action="store_true", help="keep unfinished tasks (and their milestones) for the next plan")
+
+    p = sub.add_parser("codex", help="Codex CLI as an executor: run a task, generate a reference image (skill ludovanta-codex)")
+    codex = p.add_subparsers(dest="codex_command", required=True)
+    q = codex.add_parser("run", help="give one task card to 'codex exec' and report what it did")
+    q.add_argument("task")
+    q.add_argument("--model", help="Codex model (default: codex.model in ludovanta.json or Codex's own default)")
+    q.add_argument("--timeout", type=int, default=3600, help="seconds (default 3600)")
+    q.add_argument("--json", action="store_true")
+    q = codex.add_parser("image", help="generate one image with Codex's built-in image generation")
+    q.add_argument("description", help="what the image shows: subject, style, composition, palette")
+    q.add_argument("--out", required=True, help="project-relative file, e.g. Art/References/hero.png")
+    q.add_argument("--timeout", type=int, default=900, help="seconds (default 900)")
+    q.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("hook", help="Claude Code hook entry point (installed into .claude/settings.json)")
+    p.add_argument("event", choices=["session-start", "stop"])
 
     p = sub.add_parser("update", help="update the platform to the ref in ludovanta.json or --ref")
     p.add_argument("--ref", help="git tag or branch to switch to (also updates ludovanta.json)")
@@ -144,6 +166,18 @@ def main(argv: list[str] | None = None) -> int:
                 return plan.set_task(root, args.task, args.status, args.agent)
             if pc == "fail":
                 return plan.fail_task(root, args.task, args.reason)
+            if pc == "brief":
+                return plan.brief(root, args.task)
+            if pc == "close":
+                return plan.close(root, args.carry)
+        if args.command == "codex":
+            from ludovanta_lib import codex
+            if args.codex_command == "run":
+                return codex.run_task(root, args.task, args.timeout, args.model, args.json)
+            return codex.generate_image(root, args.description, args.out, args.timeout, args.json)
+        if args.command == "hook":
+            from ludovanta_lib import hooks
+            return hooks.run(root, args.event)
     except LudovantaError as e:
         print(f"LUDOVANTA_ERROR: {e}")
         return EXIT_INFRA

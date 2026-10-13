@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install or update Ludovanta in a Unity project.
 
-    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.1
+    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.2
 
 Ownership model that keeps updates free of merge problems:
   * Platform-owned files (.ludovanta/**, <skillTarget>/ludovanta-*/**) are written only by this script.
@@ -203,6 +203,73 @@ def default_ref(version: str) -> str:
     return out if code == 0 and out else f"v{version}"
 
 
+# --- Claude Code hooks ---------------------------------------------------------------------
+# .claude/settings.json belongs to the project. Ludovanta owns only the hook handlers whose command runs
+# .ludovanta/hook.sh: they are removed and re-added on every run, everything else is left as is.
+
+SETTINGS_REL = ".claude/settings.json"
+HOOK_MARKER = ".ludovanta/hook.sh"
+
+
+def ludovanta_hooks() -> dict:
+    def handler(event: str, timeout: int) -> dict:
+        return {"type": "command", "shell": "bash", "timeout": timeout,
+                "command": f'sh "$CLAUDE_PROJECT_DIR/{HOOK_MARKER}" {event}'}
+    return {"SessionStart": [{"matcher": "startup|clear|compact", "hooks": [handler("session-start", 30)]}],
+            "Stop": [{"hooks": [handler("stop", 30)]}]}
+
+
+def merge_hooks(settings: dict, enabled: bool) -> dict:
+    result = json.loads(json.dumps(settings))
+    hooks = result.get("hooks") if isinstance(result.get("hooks"), dict) else {}
+    for event in list(hooks):
+        groups = []
+        for group in hooks[event] if isinstance(hooks[event], list) else []:
+            if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                group = dict(group, hooks=[h for h in group["hooks"]
+                                           if HOOK_MARKER not in str(h.get("command", "") if isinstance(h, dict) else "")])
+                if not group["hooks"]:
+                    continue
+            groups.append(group)
+        if groups:
+            hooks[event] = groups
+        else:
+            del hooks[event]
+    if enabled:
+        for event, groups in ludovanta_hooks().items():
+            hooks.setdefault(event, []).extend(groups)
+    if hooks:
+        result["hooks"] = hooks
+    else:
+        result.pop("hooks", None)
+    return result
+
+
+def plan_settings(root: Path, targets: list[str], cfg: dict | None) -> tuple[str, bool] | None:
+    """New text for .claude/settings.json, or None when nothing changes."""
+    enabled = ".claude/skills" in targets and (cfg or {}).get("claudeHooks", True) is not False
+    path = full(root, SETTINGS_REL)
+    raw = path.read_bytes() if path.is_file() else b""
+    if not raw.strip():
+        if not enabled:
+            return None
+        current = {}
+    else:
+        try:
+            current = json.loads(decode(raw))
+        except ValueError as e:
+            raise InstallError(f"{SETTINGS_REL} is not valid JSON ({e}); fix it, then run the update again")
+        if not isinstance(current, dict):
+            raise InstallError(f"{SETTINGS_REL} must contain a JSON object")
+    merged = merge_hooks(current, enabled)
+    if merged == current and raw.strip():
+        return None
+    text = json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
+    if b"\r\n" in raw:
+        text = text.replace("\n", "\r\n")
+    return text, raw.startswith(BOM)
+
+
 def replace_json_string(text: str, key: str, value: str) -> str:
     """Targeted replace keeps the user's formatting and other keys untouched."""
     rx = re.compile(r'"%s"\s*:\s*"(?:[^"\\]|\\.)*"' % re.escape(key))
@@ -271,12 +338,16 @@ def install(project: str, source: str | None, ref: str | None, commit: str | Non
         if name in old["blocks"] and old["blocks"][name] != text_hash(cur):
             conflicts.append((name, "ludovanta:managed block edited locally"))
 
+    settings = plan_settings(root, targets, cfg)
+
     # Report.
     print(f"{'[dry-run] ' if dry_run else ''}Ludovanta {old['version'] or 'none'} -> {version} in {root}")
     marks = {"add": "+", "update": "~", "remove": "-"}
     for op, rel in plan:
         if op in marks:
             print(f"  {marks[op]} {rel}")
+    if settings:
+        print(f"  ~ {SETTINGS_REL} (Ludovanta hooks)")
     same = sum(1 for op, _ in plan if op == "same")
     if same:
         print(f"  = {same} file(s) unchanged")
@@ -294,7 +365,7 @@ def install(project: str, source: str | None, ref: str | None, commit: str | Non
         return 0
 
     code, out = git("-C", str(root), "status", "--porcelain", "--", ".ludovanta", "ludovanta.json", "AGENTS.md", "CLAUDE.md",
-                    ".gitignore", ".gitattributes")
+                    ".gitignore", ".gitattributes", SETTINGS_REL)
     if code == 0 and out:
         print("warning: Ludovanta-managed paths already had uncommitted changes before this run.")
 
@@ -330,6 +401,9 @@ def install(project: str, source: str | None, ref: str | None, commit: str | Non
             print(f"  block: {name}")
         lock_blocks[name] = text_hash(blocks[name])
 
+    if settings:
+        write_file(full(root, SETTINGS_REL), settings[0], bom=settings[1])
+
     # Project config: created once, afterwards only explicitly passed values change.
     if not cfg_path.is_file():
         cfg_text = json.dumps({"source": source or default_source(), "ref": ref or default_ref(version),
@@ -350,6 +424,8 @@ def install(project: str, source: str | None, ref: str | None, commit: str | Non
     write_file(full(root, LOCK_REL), format_lock(version, commit, lock_files, lock_blocks))
 
     skills = " ".join(f'"{t}/ludovanta-*"' for t in targets)
+    if full(root, SETTINGS_REL).is_file():
+        skills += f" {SETTINGS_REL}"
     print(f"\nLudovanta {version} installed. Review and commit the platform changes separately, e.g.:\n"
           f"  git add -A .ludovanta ludovanta.json AGENTS.md CLAUDE.md .gitignore .gitattributes {skills}\n"
           f'  git commit -m "chore(ludovanta): update to {version}"')
