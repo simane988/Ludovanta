@@ -6,6 +6,7 @@ Standard library only, Python 3.9+.
 Layout (owned by the project, committed; folder name from 'planDir' in ludovanta.json, default 'plan'):
 
     plan/goal.md               free text: what we are building, what is in and out of scope
+    plan/design.md             header: fidelity; free text: fantasy, main verb, game feel, art direction
     plan/milestones/M1.md      header: id, title
     plan/tasks/T-001.md        header: id, title, milestone, status, agent, size, depends, attempts
 
@@ -29,6 +30,7 @@ HEADER_LINE_RX = re.compile(r"^([A-Za-z][\w-]*):\s*(.*)$")
 STARTED = ("in-progress", "review", "done")
 DEPENDENCY_MET = ("review", "done")
 DEFAULT_MAX_ATTEMPTS = 3
+FIDELITY = ("prototype", "stylized", "high", "max", "reference")
 
 
 # --- Files -----------------------------------------------------------------------------
@@ -118,8 +120,10 @@ class Plan:
         self.tasks: list[dict] = []
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        self.fidelity = ""
         if self.exists:
             self._load()
+            self._load_design()
 
     @property
     def exists(self) -> bool:
@@ -194,6 +198,24 @@ class Plan:
                 if d not in by_id:
                     self.errors.append(f"{t['file']}: depends on unknown task '{d}'")
         self.errors += [f"dependency cycle: {' -> '.join(c)}" for c in self._cycles()]
+
+    def _load_design(self) -> None:
+        path = self.dir / "design.md"
+        where = self.rel(path)
+        if not path.is_file():
+            self.warnings.append(f"no {where}: do the design pass before planning more (skill ludovanta-game-design)")
+            return
+        card = CardFile(path)
+        if card.error:
+            self.warnings.append(f"{where}: {card.error}; add a header with 'fidelity: ...'")
+            return
+        fidelity = card.fields.get("fidelity", "").strip().lower()
+        if not fidelity:
+            self.warnings.append(f"{where}: graphics fidelity not chosen, ask the user ({', '.join(FIDELITY)})")
+        elif fidelity not in FIDELITY:
+            self.errors.append(f"{where}: unknown fidelity '{fidelity}' (use {', '.join(FIDELITY)})")
+        else:
+            self.fidelity = fidelity
 
     @property
     def by_id(self) -> dict[str, dict]:
@@ -294,7 +316,9 @@ def status(root: Path, as_json: bool) -> int:
              f"overall {_bar(overall['done'], overall['review'])} {overall['done']}% done"
              + (f" (+{overall['review']}% in review)" if overall["review"] else "")
              + f" - {c['done']}/{overall['tasks']} tasks done, {c['review']} in review, {c['in-progress']} in progress, "
-               f"{c['blocked']} blocked, {c['todo']} todo"]
+               f"{c['blocked']} blocked, {c['todo']} todo",
+             f"design: fidelity {plan.fidelity}" if plan.fidelity else
+             "design: not done or fidelity not chosen - skill ludovanta-game-design"]
     milestones = []
     for m in plan.milestones:
         p = plan.progress([t for t in plan.tasks if t["milestone"] == m["id"]])
@@ -319,7 +343,7 @@ def status(root: Path, as_json: bool) -> int:
     section("next (ready to start)", ready[:5])
     if plan.errors:
         lines.append(f"problems: {len(plan.errors)} - run 'ludovanta.py plan check'")
-    data = {"goal": title, "overall": overall, "milestones": milestones, "tasks": plan.tasks,
+    data = {"goal": title, "fidelity": plan.fidelity, "overall": overall, "milestones": milestones, "tasks": plan.tasks,
             "next": [t["id"] for t in ready], "problems": plan.errors, "warnings": plan.warnings}
     return finish("PLAN", EXIT_OK, lines, data, as_json)
 
@@ -375,11 +399,53 @@ README_TEMPLATE = """# Plan
 This folder is the project plan. AI agents keep it up to date (skill `ludovanta-plan`), people review it.
 
 - `goal.md`: what we are building and what is out of scope.
+- `design.md`: how the game should play, feel and look, and the graphics fidelity (skill `ludovanta-game-design`).
 - `milestones/M<n>.md`: milestones in order.
 - `tasks/T-<nnn>.md`: one task card per file. Status, agent and size are in the header,
   acceptance criteria are the `- [ ]` lines in the body.
 
 Progress: `python3 .ludovanta/ludovanta.py plan` (on Windows `python` or `py -3`).
+"""
+
+DESIGN_TEMPLATE = """---
+fidelity:
+---
+
+# {title}: design
+
+<!-- fidelity: prototype | stylized | high | max | reference. Ask the user, do not guess. -->
+
+## Fantasy
+
+## Main verb and core loop
+
+## Session walk-through
+
+- 30 seconds:
+- 2 minutes:
+- 5 minutes:
+- 10 minutes:
+- Ending:
+
+## Challenge and failure
+
+## Progression the player sees
+
+## Game feel
+
+| Event | Feedback |
+|---|---|
+| | |
+
+## Art direction
+
+## Audio
+
+## What to cut first
+
+## Acceptance scenarios
+
+-
 """
 
 MILESTONE_TEMPLATE = """---
@@ -420,7 +486,8 @@ def init(root: Path, title: str | None) -> int:
     created = []
     for sub in ("milestones", "tasks"):
         (plan.dir / sub).mkdir(parents=True, exist_ok=True)
-    for name, text in (("README.md", README_TEMPLATE), ("goal.md", GOAL_TEMPLATE.format(title=title or "Goal"))):
+    for name, text in (("README.md", README_TEMPLATE), ("goal.md", GOAL_TEMPLATE.format(title=title or "Goal")),
+                       ("design.md", DESIGN_TEMPLATE.format(title=title or "Game"))):
         path = plan.dir / name
         if not path.exists():
             path.write_text(text, encoding="utf-8", newline="\n")

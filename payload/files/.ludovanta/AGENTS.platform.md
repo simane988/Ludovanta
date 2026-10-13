@@ -47,6 +47,21 @@ Before running anything that starts Unity, run `python3 .ludovanta/ludovanta.py 
 - **HEADLESS**: no Editor is open (typical for parallel agents in their own git worktree).
   Use the Ludovanta commands.
 
+## The goal is a game that is fun to play
+
+Compiling code, green tests and ticked criteria are the floor, not the goal. The user wants a game
+that feels like a game in the first minute and looks as polished as the fidelity they chose.
+
+- Before planning a new game or a big feature, do the design pass (skill `ludovanta-game-design`):
+  fantasy, main verb, session walk-through, game feel, art direction and the graphics fidelity,
+  kept in `plan/design.md`. Ask the user about the fidelity instead of defaulting to placeholders.
+- Never present raw greybox (grey capsules and boxes) below the chosen fidelity, and never leave an
+  important event as a silent state change: it gets animation, effects, sound or a world reaction.
+- Look at what you built: capture the gameplay camera and check the screenshots, do not judge
+  visuals from code.
+- A critic reviews the plan before the user sees it and the first playable before it is reported
+  (skill `ludovanta-design-review`). Use it too when the user says the game is boring or raw.
+
 ## Tasks: agree on the result, report against it, stop instead of looping
 
 These rules apply to every task, whether it comes from the plan or from a chat message.
@@ -58,10 +73,12 @@ These rules apply to every task, whether it comes from the plan or from a chat m
    autonomy and a result to review over questions at every step.
 2. **Report against the criteria.** Finish every task with this report, in the user's language,
    short, technical terms may stay in English:
-   - **What changed**: what the user will notice, then the main files.
+   - **What changed**: what the player will notice and feel, then the main files.
    - **How to check**: the scene to open and what to do in Play mode, or the screenshot, or the test.
-   - **Not done or uncertain**: criteria you could not verify, shortcuts taken, known problems.
-     Never leave this out to make the result look better; write "nothing" if there is nothing.
+     For gameplay, say what to try and what should feel good.
+   - **Not done or uncertain**: criteria you could not verify, shortcuts taken, known problems,
+     and what still feels flat or looks unfinished. Never leave this out to make the result look
+     better; write "nothing" if there is nothing.
    - **Next**: one or two suggested next steps.
 3. **Stop after 3 failed attempts.** If the result fails your own verification of the criteria, or
    the user rejects it, three times in a row, stop. Do not start a fourth rewrite. Tell the user what

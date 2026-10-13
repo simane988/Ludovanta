@@ -21,7 +21,9 @@ def update(project, *args):
 def test_installs_platform_files(installed_project):
     p = installed_project
     for rel in (".ludovanta/ludovanta.py", ".ludovanta/ludovanta_lib/commands.py", ".ludovanta/AGENTS.platform.md",
-                ".claude/skills/ludovanta-unity-compile/SKILL.md", ".claude/skills/ludovanta-platform-update/SKILL.md"):
+                ".claude/skills/ludovanta-unity-compile/SKILL.md", ".claude/skills/ludovanta-platform-update/SKILL.md",
+                ".claude/skills/ludovanta-game-design/SKILL.md", ".claude/skills/ludovanta-game-design/unity-craft.md",
+                ".claude/skills/ludovanta-design-review/SKILL.md"):
         assert (p / rel).is_file(), rel
     assert lock(p)["version"] == VERSION
     assert not list(p.rglob("__pycache__"))

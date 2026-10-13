@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install or update Ludovanta in a Unity project.
 
-    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.0
+    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.1
 
 Ownership model that keeps updates free of merge problems:
   * Platform-owned files (.ludovanta/**, <skillTarget>/ludovanta-*/**) are written only by this script.

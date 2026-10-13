@@ -76,6 +76,16 @@ def test_init_and_add(game):
                                      "agent": "codex", "size": "S", "depends": "[T-001]", "attempts": "0"}
 
 
+def test_init_creates_design_template(game):
+    cli(game, "init", "--title", "Фрирен")
+    design = read(game / "plan/design.md")
+    assert design.startswith("---\nfidelity:\n---\n") and "# Фрирен: design" in design
+    assert "## Game feel" in design and "## Session walk-through" in design
+    code, out = cli(game, "check")
+    assert code == 0, out
+    assert "graphics fidelity not chosen, ask the user (prototype, stylized, high, max, reference)" in out
+
+
 def test_init_keeps_existing_files(game):
     write(game / "plan/goal.md", "# Mine\n")
     cli(game, "init", "--title", "Other")
@@ -175,6 +185,35 @@ def test_check_problems(game, setup, expected):
     code, out = cli(game, "check")
     assert code == 1, out
     assert out.startswith("PLAN_INVALID")
+    assert expected in out
+
+
+# --- design ----------------------------------------------------------------------------------------
+
+def test_missing_design_is_a_warning(planned):
+    code, out = cli(planned, "check")
+    assert code == 0, out
+    assert "warning: no plan/design.md: do the design pass" in out
+    assert "design: not done or fidelity not chosen - skill ludovanta-game-design" in cli(planned)[1]
+
+
+def test_fidelity_shown_in_status(planned):
+    write(planned / "plan/design.md", "---\nfidelity: Stylized\n---\n\n# Такси: дизайн\n")
+    code, out = cli(planned, "status", "--json")
+    assert code == 0, out
+    assert json.loads(out)["fidelity"] == "stylized"
+    assert "design: fidelity stylized" in cli(planned)[1]
+    assert "design" not in cli(planned, "check")[1]
+
+
+@pytest.mark.parametrize("text, expected, code", [
+    ("---\nfidelity: ultra\n---\n", "unknown fidelity 'ultra'", 1),
+    ("# Free text only\n", "no header", 0),
+], ids=["unknown", "no-header"])
+def test_design_problems(planned, text, expected, code):
+    write(planned / "plan/design.md", text)
+    got, out = cli(planned, "check")
+    assert got == code, out
     assert expected in out
 
 
