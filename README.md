@@ -6,8 +6,9 @@
 другие, в том числе запущенные из ADE вроде Orca), команды headless-проверок проекта и безопасный
 механизм установки/обновления платформы в игровые проекты.
 
-Платформа не вмешивается в Unity: всё работает снаружи через batchmode Unity, официальный Unity MCP
-(когда открыт Editor) и файлы в репозитории проекта.
+Платформа почти не вмешивается в Unity: всё работает снаружи через batchmode Unity, официальный Unity MCP
+(когда открыт Editor) и файлы в репозитории проекта. Внутрь проекта ставится только маленький
+editor-пакет `Packages/com.ludovanta.editor`: без него нельзя отрендерить кадр для скриншота.
 
 Требования: **Python 3.9+** (только стандартная библиотека, без pip-зависимостей), git, Unity через
 Unity Hub. Работает на Windows, macOS и Linux.
@@ -17,12 +18,13 @@ Unity Hub. Работает на Windows, macOS и Linux.
 ```
 <project>/
   .ludovanta/                           # принадлежит платформе, заменяется целиком при обновлении
-    ludovanta.py                        #   единая точка входа: status | compile | test | test-audit | validate-assets | plan | codex | feedback | update
+    ludovanta.py                        #   единая точка входа: status | compile | test | test-audit | validate-assets | plan | codex | feedback | worker | worktree | update
     ludovanta_lib/                      #   реализация команд
     hook.sh                             #   запуск хуков Claude Code (ищет Python 3.9+)
     lock.json                           #   установленная версия + хэши всех файлов платформы
   .claude/skills/ludovanta-*/SKILL.md   # скиллы платформы для Claude Code
   .agents/skills/ludovanta-*/SKILL.md   # те же скиллы для Codex (папки задаются в skillTargets)
+  Packages/com.ludovanta.editor/        # принадлежит платформе: editor-скрипт для скриншотов (только Editor)
   .claude/settings.json                 # + хуки Ludovanta (SessionStart, Stop), остальные настройки ваши
   AGENTS.md                             # + блок ludovanta:managed с правилами для агентов, остальной текст ваш
   CLAUDE.md                             # + блок ludovanta:managed с импортом @AGENTS.md, остальной текст ваш
@@ -36,7 +38,7 @@ Unity Hub. Работает на Windows, macOS и Linux.
 Команды (из корня проекта; на Windows `python` или `py -3` вместо `python3`):
 
 ```
-python3 .ludovanta/ludovanta.py status            # LIVE (открыт Editor) или HEADLESS, найден ли Unity
+python3 .ludovanta/ludovanta.py status            # LIVE (открыт Editor) или HEADLESS, найдены ли Unity, Codex и Orca
 python3 .ludovanta/ludovanta.py compile           # компиляция в batchmode, компактный список ошибок
 python3 .ludovanta/ludovanta.py test [--platform EditMode|PlayMode] [--filter X] [--category Y] [--repeat N]
 python3 .ludovanta/ludovanta.py test-audit        # хрупкие, медленные и нестабильные тесты, без запуска Unity
@@ -50,6 +52,11 @@ python3 .ludovanta/ludovanta.py codex run T-001      # отдать задачу
 python3 .ludovanta/ludovanta.py codex image "описание" --out Art/References/hero.png   # референс через Codex
 python3 .ludovanta/ludovanta.py feedback add "что мешает" --doing "что делали" --severity 1|2|3
 python3 .ludovanta/ludovanta.py feedback show [--days 7]  # журнал трения для еженедельного разговора
+python3 .ludovanta/ludovanta.py worker start T-001 [--agent claude|codex]  # исполнитель в worktree Orca
+python3 .ludovanta/ludovanta.py worker wait|list|send T-001 "..."|finish T-001   # ждать, ответить, слить
+python3 .ludovanta/ludovanta.py worktree clean [--dry-run]  # удалить worktree, чья работа уже слита
+python3 .ludovanta/ludovanta.py screenshot [--scene X.unity] [--camera C] [--play 3] [--frames 4] [--label T-012-after]
+python3 .ludovanta/ludovanta.py doctor [--offline] # всё ли на месте и что чинить первым
 python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 ```
 
@@ -66,6 +73,7 @@ python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 | `ludovanta-unity-compile` | после изменений C#/asmdef/пакетов, разбор ошибок компиляции, live-режим через Unity MCP |
 | `ludovanta-unity-test` | тесты как самопроверка агента: запуск и написание EditMode/PlayMode тестов, какой тест хороший, нестабильные тесты и карантин, аудит набора тестов |
 | `ludovanta-plan` | планирование и декомпозиция, прогресс, оркестратор и исполнители задач, handoff и новые сессии, закрытие плана, остановка после 3 неудачных попыток |
+| `ludovanta-screenshot` | скриншоты того, что видит игрок (с HUD): «было / стало» для визуальных задач, серии кадров, картинки в отчёте |
 | `ludovanta-feedback` | «запиши, что неудобно»: запись в журнал трения `docs/feedback-log.md` и сводка за неделю |
 | `ludovanta-codex` | Codex CLI как исполнитель небольших задач (`agent: codex`) и генератор картинок-референсов |
 | `ludovanta-unity-assets` | создание/перенос/удаление ассетов, .meta и GUID, правила для сцен и префабов |
@@ -114,20 +122,83 @@ greybox. У задач с геймплеем есть критерии ощущ�
 ### Длинные планы и контекст
 
 Сессия, которая говорит с пользователем, работает как оркестратор: каждую задачу она отдаёт исполнителю
-со свежим контекстом (субагенту Claude или Codex) и читает только его короткий отчёт. Исполнитель получает
+со свежим контекстом (Claude или Codex в worktree Orca, без Orca субагенту Claude или `codex run`) и
+читает только его короткий отчёт. Исполнитель получает
 всё нужное одной командой `plan brief T-xxx`: дизайн, карточку, handoff зависимостей и правила. Поэтому
 контекст оркестратора растёт на килобайты за задачу, а не на весь написанный код.
 
 Решения хранятся в файлах плана, а не в чате, так что новая сессия ничего не теряет. Хуки Claude Code,
 которые ставит Ludovanta:
 
-- **SessionStart** (новая сессия, `/clear`, компрессия): кладёт в контекст `plan brief` и `plan/handoff.md`;
-- **Stop** (после каждого ответа): если только что закрыта веха и контекст больше 100k токенов (или закрыта
-  любая задача при контексте больше 300k), просит агента записать `plan/handoff.md` и предложить
-  пользователю `/clear`. Пороги: `ludovanta.json` → `"handoff": {"milestoneTokens": 100000, "taskTokens": 300000}`.
+- **SessionStart** (новая сессия, `/clear`, компрессия): кладёт в контекст `plan brief` и `plan/handoff.md`,
+  в фоне удаляет слитые worktree (см. ниже);
+- **Stop** (после каждого ответа): если закрылась задача, в фоне удаляет слитые worktree. Если только что
+  закрыта веха и контекст больше 100k токенов (или закрыта любая задача при контексте больше 300k), просит
+  агента записать `plan/handoff.md` и предложить пользователю `/clear`.
+  Пороги: `ludovanta.json` → `"handoff": {"milestoneTokens": 100000, "taskTokens": 300000}`.
 
 Сам сбросить контекст хук не может, поэтому `/clear` набирает пользователь. После этого достаточно
 написать «продолжай». Отключить хуки: `"claudeHooks": false` в `ludovanta.json` и `update`.
+
+### Исполнители в Orca
+
+Если запущен Orca (`status` это показывает), оркестратор отдаёт каждую задачу отдельному агенту в Orca, и
+пользователь видит всех исполнителей прямо там. Где работает агент, решает поле `editor` в карточке:
+
+| | `editor: true` (по умолчанию) | `editor: false` (`add-task --headless`) |
+|---|---|---|
+| Задачи | сцены, префабы, визуал, ощущения от игры, Play mode, всё через Unity MCP | логика с EditMode-тестами, данные, конфиги, утилиты |
+| Где | новый терминал агента в основной рабочей копии, где открыт Editor | свой worktree Orca, HEADLESS (batchmode), без Unity MCP |
+| Сколько сразу | одна | сколько готово и не пересекается по файлам |
+| Конец | `worker finish` коммитит файлы задачи в текущую ветку, сливать нечего | `worker finish` коммитит работу, сливает ветку и удаляет worktree |
+
+Unity открывает папку проекта только в одном экземпляре, а Unity MCP подключается к Editor основной
+папки. Поэтому задачи, которым нужен Editor, идут по очереди. Логику и данные план выносит в
+параллельные задачи без Editor.
+
+- `worker start T-001 [--agent claude|codex]` коммитит карточку со статусом `in-progress` и запускает
+  агента в его полосе. Для worktree Orca берёт текущую ветку, а не `origin/main`. Незакоммиченный план
+  исполнитель не увидит, поэтому команда требует сначала закоммитить `plan/`. Вторую задачу в Editor
+  она не запускает (`EDITOR_BUSY`).
+- `worker wait` ждёт (до 9 минут за вызов, это меньше лимита на одну команду у агента), пока
+  исполнитель закончит или остановится, и печатает его последнее сообщение как отчёт. Готовность
+  определяется по карточке (`review`) и по состоянию агента в Orca. Агент в основной папке отличается
+  от самого оркестратора по своей панели терминала.
+- `worker send T-001 "..."` передаёт агенту ответ на вопрос или правку.
+- `worker finish T-001` коммитит работу исполнителя: сами исполнители не коммитят, потому что песочница
+  Codex держит `.git` только для чтения, а git-данные worktree лежат в `.git` основной папки. У задачи в
+  worktree команда коммитит всё, сливает ветку (`--no-ff`) и удаляет worktree через Orca, а затем и ветку. При конфликте ничего не сливается, и исполнителя просят влить основную ветку к себе.
+  Пока работает задача в Editor, слияния не делаются: они меняли бы файлы под её Editor. У задачи в
+  Editor она коммитит файлы, изменённые с начала задачи (файлы, которые уже были изменены до старта,
+  не трогает и перечисляет), и закрывает терминал агента.
+- `worker list` показывает всех исполнителей без ожидания.
+
+Codex Orca запускает со своими настройками. Если в `ludovanta.json` или `ludovanta.local.json` задан
+`"codex": {"sandbox": "...", "model": "..."}`, `worker start` запускает `codex --sandbox ... --model ...`
+сам, и настройка действует и для `codex run`. Если Codex в worktree не может запустить Unity или записать
+нужное, на этой машине ставится `"codex": {"sandbox": "danger-full-access"}` в `ludovanta.local.json`.
+
+Состояние исполнителей лежит в `Logs/ludovanta/workers/`. Путь к `orca` можно задать в
+`ludovanta.local.json` → `"orcaPath"` или в переменной `ORCA_PATH`. Без Orca всё работает как раньше:
+субагент Claude или `codex run`, по одному, пока открыт Editor.
+
+### Очистка worktree
+
+Когда ветка задачи слита в основную ветку, Ludovanta удаляет её worktree вместе с веткой. Обычно это
+делает `worker finish`. Остальные случаи (worktree, созданные вручную, или `finish`, который не смог
+удалить worktree) закрывает `worktree clean`. Worktree, которые знает Orca, удаляются через Orca, и он
+сам закрывает их терминалы. Хуки Claude Code запускают очистку в фоне в основной рабочей копии: при
+старте сессии и после ответа, в котором закрылась задача. Без хуков (Codex) оркестратор запускает
+`worktree clean` сам.
+
+Worktree остаётся на месте, если в нём есть что терять или он занят: ветка не слита (squash-слияние тоже
+считается неслитым), есть незакоммиченные или неотслеживаемые файлы, в нём ещё ничего не закоммичено
+(агент только начинает работу), он заблокирован (`git worktree lock`), в нём работает агент Orca, он
+открыт в Unity или, на Windows, занят другой программой (для worktree вне Orca). Основная рабочая копия
+и worktree, из которого запущена команда, не удаляются никогда. Почему остался каждый worktree,
+показывает `worktree clean --dry-run`. Результат фоновой очистки пишется в
+`Logs/ludovanta/worktree-clean.log`. Отключить автоочистку: `"worktrees": {"autoClean": false}` в
+`ludovanta.json`.
 
 ### Когда план выполнен
 
@@ -195,6 +266,41 @@ Codex CLI подключается как второй агент: исполн�
   (открыт Editor, песочница Codex), агент пишет `--unverified "почему и что проверил вместо этого"`.
   Это попадает в журнал карточки, и оркестратор прогоняет тесты сам до отчёта пользователю.
 
+### Скриншоты
+
+`screenshot` снимает то, что видит камера игрока, вместе с HUD (canvas в режиме Screen Space - Overlay
+на время снимка переводится на эту камеру), и сохраняет PNG в `Logs/ludovanta/screenshots/`.
+
+- **HEADLESS** (Editor закрыт): Unity запускается в batchmode с графикой, открывает `--scene` (по
+  умолчанию первую сцену из Build Settings) и рендерит камеру.
+- **LIVE** (Editor открыт): снимок делает сам открытый Editor. Он подхватывает файл-запрос из
+  `Temp/ludovanta/capture/` меньше чем за секунду, Unity MCP не нужен. Сцены в открытом Editor
+  платформа не переключает, чтобы не потерять несохранённую работу.
+- `--play 3` входит в Play mode и ждёт 3 секунды: для игр, где камера, игрок и HUD создаются в
+  рантайме. `--frames 4 --every 0.25` снимает серию кадров для анимаций и эффектов.
+- Визуальная задача получает пару снимков `T-xxx-before` и `T-xxx-after`, а отчёт даёт пути к ним.
+- Однотонный снимок помечается предупреждением: камера ничего не видит или рендер в batchmode не
+  работает с этим render pipeline.
+
+Рендер делает `Packages/com.ludovanta.editor/Editor/Capture.cs`: встроенный пакет, только Editor,
+фиксированные GUID в `.meta`. Он ставится и обновляется вместе с платформой. `.meta` этого пакета
+Unity может переписать сам, поэтому их изменения не считаются локальными правками. Проверено на
+Unity 6 (6000.6) со встроенным render pipeline в batchmode и в открытом Editor.
+
+### doctor
+
+`doctor` проверяет за пару секунд и печатает по строке на каждую проверку:
+- Python и git (репозиторий, имя и почта для коммитов);
+- Unity нужной версии;
+- целостность файлов платформы и есть ли новая версия;
+- скиллы в папках агентов, блок правил в `AGENTS.md` и импорт в `CLAUDE.md`, раздел `## Preferences`;
+- Claude Code и его хуки, Codex и вход в него, Orca;
+- Unity MCP и editor-пакет Ludovanta;
+- план.
+
+Первая строка — итог и **один следующий шаг** для самой важной проблемы. Код выхода `2`, если что-то
+сломано (`FAIL`). `--offline` пропускает проверку новых версий.
+
 ### Журнал трения
 
 Фраза агенту «запиши, что неудобно» добавляет строку в `docs/feedback-log.md` (скилл
@@ -207,7 +313,7 @@ Codex CLI подключается как второй агент: исполн�
 
 ```
 git clone <url-этого-репозитория> ludovanta
-python3 ludovanta/install.py --project /path/to/MyGame --source <url-этого-репозитория> --ref v0.1.3
+python3 ludovanta/install.py --project /path/to/MyGame --source <url-этого-репозитория> --ref v0.1.4
 ```
 
 `--source` и `--ref` записываются в `ludovanta.json` проекта и дальше используются для обновлений.

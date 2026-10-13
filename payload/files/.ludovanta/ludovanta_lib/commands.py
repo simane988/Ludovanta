@@ -53,8 +53,13 @@ def status(root: Path, as_json: bool) -> int:
     if codex and ".agents/skills" not in targets:
         lines.append("codex skills: Codex does not see the ludovanta-* skills - add \".agents/skills\" to "
                      "\"skillTargets\" in ludovanta.json and run 'update'")
+    from .orca import available
+    orca_exe, orca_note = available(root)
+    lines.append("orca: running -> executors go to Orca worktrees ('worker start')" if orca_exe
+                 else f"orca: not available ({orca_note}) -> executors are subagents or 'codex run'")
     data = {"project": str(root), "platformVersion": platform_version, "unityVersion": unity_version(root),
-            "unityEditor": unity, "editorOpen": is_open, "mode": mode, "mcpPackage": has_mcp, "codex": codex}
+            "unityEditor": unity, "editorOpen": is_open, "mode": mode, "mcpPackage": has_mcp, "codex": codex,
+            "orca": bool(orca_exe)}
     return finish(mode, EXIT_OK, lines, data, as_json)
 
 

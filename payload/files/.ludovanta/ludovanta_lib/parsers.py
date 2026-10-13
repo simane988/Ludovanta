@@ -102,8 +102,9 @@ def _cases(el, inherited: set[str], out: list) -> None:
 
 
 def _float(value: str | None) -> float:
+    """Unity writes durations in the system locale: '0,0331029' on a Russian Windows."""
     try:
-        return float(value or 0)
+        return float((value or "0").replace(",", "."))
     except ValueError:
         return 0.0
 

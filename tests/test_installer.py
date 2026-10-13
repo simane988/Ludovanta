@@ -83,6 +83,21 @@ def test_dry_run_does_not_write(installed_project):
 
 # --- local changes -----------------------------------------------------------------------------
 
+def test_editor_package_installed_and_meta_rewrites_do_not_block(installed_project):
+    p = installed_project
+    package = p / "Packages/com.ludovanta.editor"
+    for rel in ("package.json", "package.json.meta", "Editor.meta", "Editor/Capture.cs", "Editor/Capture.cs.meta",
+                "Editor/Ludovanta.Editor.asmdef", "Editor/Ludovanta.Editor.asmdef.meta"):
+        assert (package / rel).is_file(), rel
+    assert (p / ".claude/skills/ludovanta-screenshot/SKILL.md").is_file()
+    assert "/Packages/com.ludovanta.editor/** text eol=lf" in read(p / ".gitattributes")
+    meta = package / "Editor/Capture.cs.meta"
+    write(meta, read(meta) + "timeCreated: 1700000000\n")   # what an older Unity adds on import
+    code, out = install(p)
+    assert code == 0, out
+    assert "timeCreated" not in read(meta), "the platform's .meta is restored"
+
+
 def test_modified_platform_file_blocks_update(installed_project):
     target = installed_project / ".ludovanta/ludovanta_lib/plan.py"
     write(target, read(target) + "local hack\n")

@@ -15,7 +15,7 @@ INSTALL = REPO / "install.py"
 IS_WINDOWS = os.name == "nt"
 
 GIT_CONFIG = ["-c", "user.name=ludovanta-test", "-c", "user.email=ludovanta@test.local", "-c", "init.defaultBranch=main",
-              "-c", "commit.gpgsign=false"]
+              "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false"]
 if IS_WINDOWS:
     GIT_CONFIG += ["-c", "core.autocrlf=true"]   # the Git for Windows default
 

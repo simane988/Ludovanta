@@ -1,6 +1,6 @@
 ---
 name: ludovanta-plan
-description: Plan the game and work by task cards. Use when the user asks to plan, break a goal down into tasks, show progress or "how much is done", pick the next task, continue the plan, or work on a task by id (T-001); also when a task fails repeatedly, the user rejects a result, a milestone is finished, the session context is large, or the plan is complete. Covers the plan/ folder, task cards with acceptance criteria, task statuses, running the plan as an orchestrator with one executor (subagent or Codex) per task, handoff and fresh sessions, closing a finished plan, the stop-after-3-failed-attempts rule, and splitting tasks between Claude and Codex with per-agent statistics (plan stats). Also use when the user asks which agent does what better. For a new game or a big feature, the design pass (ludovanta-game-design) comes first.
+description: Plan the game and work by task cards. Use when the user asks to plan, break a goal down into tasks, show progress or "how much is done", pick the next task, continue the plan, or work on a task by id (T-001); also when a task fails repeatedly, the user rejects a result, a milestone is finished, the session context is large, or the plan is complete. Covers the plan/ folder, task cards with acceptance criteria, task statuses, running the plan as an orchestrator with one executor per task (an Orca worktree with Claude or Codex, or a subagent or Codex run without Orca), handoff and fresh sessions, closing a finished plan, the stop-after-3-failed-attempts rule, and splitting tasks between Claude and Codex with per-agent statistics (plan stats). Also use when the user asks which agent does what better. For a new game or a big feature, the design pass (ludovanta-game-design) comes first.
 ---
 
 # Project plan and task cards
@@ -25,13 +25,16 @@ python3 .ludovanta/ludovanta.py plan next [--agent codex]  # tasks ready to star
 python3 .ludovanta/ludovanta.py plan check                 # validate the plan after editing it
 python3 .ludovanta/ludovanta.py plan init --title "..."    # create the folder
 python3 .ludovanta/ludovanta.py plan add-milestone --title "..."
-python3 .ludovanta/ludovanta.py plan add-task --milestone M1 --title "..." [--agent claude|codex|any] [--size S|M|L] [--depends T-001 ...]
+python3 .ludovanta/ludovanta.py plan add-task --milestone M1 --title "..." [--agent claude|codex|any] [--size S|M|L] [--headless] [--depends T-001 ...]
 python3 .ludovanta/ludovanta.py plan set T-001 --status in-progress|review|done|blocked|dropped|todo [--agent ...]
 python3 .ludovanta/ludovanta.py plan fail T-001 "why the attempt failed"
 python3 .ludovanta/ludovanta.py plan brief                 # state + handoff, what a fresh session needs
 python3 .ludovanta/ludovanta.py plan brief T-001           # everything an executor needs for one task
 python3 .ludovanta/ludovanta.py plan stats                 # per agent: accepted tasks, first-try rate, failed attempts
 python3 .ludovanta/ludovanta.py plan close [--carry]       # archive a finished plan, numbering continues
+python3 .ludovanta/ludovanta.py worker start T-001 [--agent claude|codex]  # executor in an Orca worktree
+python3 .ludovanta/ludovanta.py worker wait | list | send T-001 "..." | finish T-001
+python3 .ludovanta/ludovanta.py worktree clean [--dry-run] # remove the worktrees whose work is merged
 ```
 
 On Windows use `python` (or `py -3`) if `python3` is not available. `plan`, `plan check`,
@@ -48,6 +51,7 @@ milestone: M2
 status: todo
 agent: any
 size: M
+editor: true
 depends: [T-004]
 attempts: 0
 ---
@@ -83,6 +87,12 @@ public API), decisions and gotchas the dependent tasks need. 'plan brief' passes
   charge glow, a beam, an impact burst with a sound and a camera shake, the rubble flies apart" is.
 - `size`: S (under an hour of agent work), M (one to two hours), L (half a day). Split anything
   bigger.
+- `editor`: does the task need the Unity Editor? `true` (the default, also when the field is
+  missing): scenes, prefabs, materials, UI layout, anything judged on screenshots or in Play mode,
+  anything done through Unity MCP. Only one Editor can open a project folder, so these tasks run one
+  at a time, in the main working copy. `false` (`add-task --headless`): code, data and configs checked
+  by EditMode tests in batchmode, editor utilities; these run in parallel, each in its own worktree.
+  When unsure, leave `true`.
 - `agent`: who should do it: `claude`, `codex`, `any`, or a person. When work starts, the
   executor replaces `any` with itself (`plan set T-xxx --agent claude`), so the card records who
   did it; `plan stats` compares the agents by it. See "Splitting tasks between agents".
@@ -135,7 +145,11 @@ preferences in `AGENTS.md`.
    `ludovanta-unity-test`). Tests do not replace looking at the game: visual tasks are checked on
    screenshots.
 7. Tasks are vertical: each one changes something visible or testable on its own. Prefer tasks that
-   touch different files, so agents can work on them in parallel without merge conflicts.
+   touch different files, so agents can work on them in parallel without merge conflicts. Tasks that
+   need the Editor (`editor: true`) run one after another, so keep them short: put the rules, numbers
+   and data in `editor: false` tasks that run in parallel (the fare calculation and its tests), and
+   leave the Editor task the wiring, the scene and the feel (the meter on the HUD with its sound and
+   pop). Two tasks never edit the same scene or prefab at the same time.
 8. Write the acceptance criteria for every task you create. A task without criteria cannot start.
 9. Run the critic, checkpoint `plan` (skill `ludovanta-design-review`), and fix what it finds.
 10. Show the user the design in short (fantasy, main verb, the first 2 minutes, fidelity) and the
@@ -144,7 +158,8 @@ preferences in `AGENTS.md`.
 11. Run `plan check` and fix every problem it reports.
 
 Only one agent restructures the plan at a time (adds, splits or reorders tasks), in the main working
-copy. Agents working on tasks in other worktrees change only their own task card.
+copy. Agents working on tasks in other worktrees change only their own task card. Executors do not commit:
+`worker finish` commits their work and merges it.
 
 ## Running the plan: an orchestrator and one executor per task
 
@@ -156,23 +171,50 @@ comes back.
 
 Orchestrator, for each task (`plan next`, or the one the user named):
 
-1. Pick the executor by the card's `agent`: `codex` -> `ludovanta.py codex run T-xxx` (skill
-   `ludovanta-codex`); `claude` or `any` -> a subagent (Claude Code: the Agent tool, general-purpose).
-   Without subagents, do the task yourself (see "Working on a task") and rely on the handoff below
-   to keep the context small.
-2. Subagent prompt, nothing more: "You are the executor of Ludovanta task T-xxx in this Unity
-   project. Run `python3 .ludovanta/ludovanta.py plan brief T-xxx` (on Windows `python` or `py -3`)
-   and do the task by its rules." plus only what the card cannot know (the user's latest words about
-   this task). The brief carries the design, the card, the dependencies' handoffs and the rules.
-3. One executor at a time while the Unity Editor is open (LIVE): they share the Editor and its
-   compilation. Parallel executors only in their own git worktrees (HEADLESS).
+1. Pick where the executor runs. `status` says whether Orca is running.
+   - **Orca running** (the usual case): `worker start T-xxx [--agent claude|codex]` (the card's `agent`;
+     `any` -> claude). It commits the card as in-progress and starts the agent in Orca, so the user
+     sees every executor there. The card's `editor` field picks the lane:
+     - `editor: true`: a new agent terminal in the main working copy, where the Editor and Unity MCP
+       are. One such task at a time (`EDITOR_BUSY` otherwise). Nothing to merge.
+     - `editor: false`: an Orca worktree from the current branch, HEADLESS, without Unity MCP. As many
+       as are ready and touch different files.
+     Commit the plan before starting (executors start from the last commit). Start the ready Editor
+     task and every ready `editor: false` task, then `worker wait`.
+   - **No Orca**: `codex` -> `ludovanta.py codex run T-xxx` (skill `ludovanta-codex`); `claude` or
+     `any` -> a subagent (Claude Code: the Agent tool, general-purpose) with only this prompt: "You
+     are the executor of Ludovanta task T-xxx in this Unity project. Run `python3
+     .ludovanta/ludovanta.py plan brief T-xxx` (on Windows `python` or `py -3`) and do the task by
+     its rules." Without subagents, do the task yourself (see "Working on a task").
+   Add only what the card cannot know (the user's latest words about this task): put it on the card
+   and commit before the start, or send it with `worker send`. The brief carries the design, the card,
+   the dependencies' handoffs and the rules.
+2. Without Orca: one executor at a time while the Unity Editor is open (LIVE), they share the Editor
+   and its compilation.
+3. `worker wait` returns when an executor needs you (at most 9 minutes; run it again while
+   `WORKERS_RUNNING`), with its final message as the report:
+   - **finished** (card in review): verify (step 4), then `worker finish T-xxx`. Executors do not
+     commit (Codex's sandbox keeps `.git` read-only), so it commits for them. A worktree task: it
+     commits everything in the worktree, merges the branch into the current branch and removes the
+     worktree and the branch through Orca. An Editor task: it commits the files changed since the
+     start (files that were already uncommitted then stay out and are listed) and closes the agent
+     terminal; then the next Editor task can start. No merges while an Editor task works (`EDITOR_BUSY`): the merge would
+     change files under its Editor. `MERGE_CONFLICT`: nothing is merged; ask the executor to merge the
+     current branch into its own and resolve the conflicts (`worker send`), then finish again.
+   - **stopped** or **blocked** (the agent is idle, the card is not in review): a question, a failure or
+     a STOP. Answer what you can, ask the user the rest, and pass the answer with
+     `worker send T-xxx "..."`.
+   `worker list` shows every executor without waiting. Worktrees that are merged but still exist
+   (made by hand, or a finish that could not remove them) are removed by `worktree clean`; the Claude
+   Code hooks run it in the background. It keeps a worktree with unmerged or uncommitted work, an
+   agent working in it, or Unity open in it; `worktree clean --dry-run` says why.
 4. Read the report. Check the claims that matter cheaply: the card's ticked criteria, the compile
    and test status, a screenshot for anything visible. An executor's report is not proof. A task that
    went to review `--unverified` (see the card's log) is not verified: run the full tests yourself
    (`test`, or Unity MCP in LIVE mode) before reporting to the user. If it lists
    "Tests changed", look at those diffs: an expectation bent to fit the code is a failed attempt.
-5. If the executor came back with a question, ask the user, then start a new executor with the
-   answer. If it failed, `plan fail` and start a new one with a different approach.
+5. If the executor came back with a question, ask the user, then pass the answer (`worker send`, or a
+   new executor without Orca). If it failed, `plan fail` and give it a different approach.
 6. At the end of a milestone: the critic (skill `ludovanta-design-review`), then one report to the
    user and a playtest request (see "Working on a task", steps 5-7).
 7. Test upkeep is yours, not the user's, and not in the plan: when tests got in an executor's way
@@ -214,7 +256,9 @@ Handoff (also do it unasked at the end of a milestone in a long session, and in 
 3. `plan set T-xxx --status in-progress --agent claude` (or whoever you are).
 4. Do the work. Verify each criterion yourself (compile, tests, Unity MCP, screenshots) and tick
    (`- [x]`) the ones you verified. Leave the ones only the user can judge unticked. For anything
-   the player sees, capture the gameplay camera and look at it before calling it done.
+   the player sees, capture the gameplay camera (`screenshot`, a `--label T-xxx-before` shot when you
+   start and `T-xxx-after` when you finish, skill `ludovanta-screenshot`) and look at it before calling
+   it done.
 5. When the task completes a milestone with new gameplay, run the critic first (skill
    `ludovanta-design-review`, checkpoint `first-playable` for the first milestone, `milestone` later)
    and fix its BLOCKER and MAJOR findings.

@@ -1,0 +1,7 @@
+{
+  "name": "com.ludovanta.editor",
+  "version": "0.1.4",
+  "displayName": "Ludovanta Editor",
+  "description": "Editor helpers for the Ludovanta platform: screenshots for AI agents in batchmode and in the open Editor. Managed by Ludovanta, overwritten on update.",
+  "unity": "2021.3"
+}

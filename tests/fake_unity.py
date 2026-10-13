@@ -4,10 +4,13 @@
     tests_flaky        Subtracts fails on odd runs and passes on even ones (run counter: FAKE_UNITY_COUNTER file)
     tests_quarantine   Subtracts fails but is in category Flaky; the TimerTests fixture is quarantined as a whole
 """
+import json
 import os
 import re
 import shutil
+import struct
 import sys
+import zlib
 from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -56,11 +59,55 @@ def results_xml(suites) -> str:
             + "\n".join(body) + "\n</test-run>\n")
 
 
+def png() -> bytes:
+    """A valid 1x1 PNG."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00\x10\x20\x30")) + chunk(b"IEND", b""))
+
+
+def capture(mode: str) -> tuple[str, int]:
+    """-executeMethod Ludovanta.Editor.Capture.Batch: answers like Capture.cs (modes: ok, capture_uniform,
+    capture_error; compile_error and no_package write no result)."""
+    if mode == "compile_error":
+        return (FIXTURES / "compile-errors.log").read_text(encoding="utf-8"), 1
+    if mode == "no_package":
+        return "executeMethod class 'Ludovanta.Editor.Capture' could not be found.\n", 1
+    if mode == "license":
+        return "[Licensing::Client] Error: No valid Unity Editor license found. Please activate your license.\n", 1
+    request_path = Path(arg("-ludovantaRequest"))
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    result = answer(request, mode)
+    (request_path.parent / f"{request['id']}.result.json").write_text(json.dumps(result), encoding="utf-8")
+    return "capture done\n", 0 if result["ok"] else 1
+
+
+def answer(request: dict, mode: str) -> dict:
+    """What Capture.cs writes for a request (also used by the tests that play the open Editor)."""
+    result = {"id": request["id"], "ok": True, "error": "", "files": [], "scene": request["scene"] or "Assets/Main.unity",
+              "camera": request["camera"] or "Main Camera", "playMode": request["play"] > 0,
+              "uniform": mode == "capture_uniform", "width": request["width"], "height": request["height"]}
+    if mode == "capture_error":
+        return {**result, "ok": False, "error": f"camera '{request['camera']}' not found among the enabled cameras: Main Camera"}
+    out = Path(request["output"])
+    series = request["frames"] > 1 and request["play"] > 0
+    for i in range(request["frames"] if series else 1):
+        path = out.with_name(f"{out.stem}-{i + 1:02d}.png") if series else out
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(png())
+        result["files"].append(str(path))
+    return result
+
+
 def main():
     mode = os.environ.get("FAKE_UNITY_MODE", "ok")
     log, results = arg("-logFile"), arg("-testResults")
     text, code = "Fake Unity batchmode\nargs: " + " ".join(sys.argv[1:]) + "\n", 0
-    if mode == "compile_error":
+    if arg("-executeMethod") == "Ludovanta.Editor.Capture.Batch":
+        more, code = capture(mode)
+        text += more
+    elif mode == "compile_error":
         text += (FIXTURES / "compile-errors.log").read_text(encoding="utf-8")
         code = 1
     elif mode == "license":

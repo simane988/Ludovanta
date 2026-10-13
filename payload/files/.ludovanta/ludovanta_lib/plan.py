@@ -8,7 +8,7 @@ Layout (owned by the project, committed; folder name from 'planDir' in ludovanta
     plan/goal.md               free text: what we are building, what is in and out of scope
     plan/design.md             header: fidelity; free text: fantasy, main verb, game feel, art direction
     plan/milestones/M1.md      header: id, title
-    plan/tasks/T-001.md        header: id, title, milestone, status, agent, size, depends, attempts
+    plan/tasks/T-001.md        header: id, title, milestone, status, agent, size, editor, depends, attempts
 
 Each file starts with a header between '---' lines ('key: value', lists as '[a, b]'). The task body is free
 markdown in any language; every checkbox line ('- [ ] ...') in it is an acceptance criterion.
@@ -33,6 +33,7 @@ STARTED = ("in-progress", "review", "done")
 DEPENDENCY_MET = ("review", "done")
 DEFAULT_MAX_ATTEMPTS = 3
 FIDELITY = ("prototype", "stylized", "high", "max", "reference")
+BOOL_VALUES = {"true": True, "yes": True, "false": False, "no": False}
 
 
 # --- Files -----------------------------------------------------------------------------
@@ -170,6 +171,9 @@ class Plan:
                 "id": f["id"], "title": f.get("title", ""), "milestone": f.get("milestone", ""),
                 "status": f.get("status", "todo").lower(), "agent": (f.get("agent") or "any").lower(),
                 "size": (f.get("size") or "M").upper(), "depends": parse_list(f.get("depends", "")),
+                # Needs the Unity Editor (scenes, prefabs, visuals, Play mode): one at a time in the main working
+                # copy. A missing field means yes, the safe default; 'false' lets the task run in a parallel worktree.
+                "editor": BOOL_VALUES.get((f.get("editor") or "true").lower()),
                 "attempts": 0, "criteria": len(criteria),
                 "criteriaChecked": sum(1 for m in criteria if m.group(1) != " "), "file": where,
             }
@@ -177,6 +181,9 @@ class Plan:
                 task["attempts"] = int(f.get("attempts") or 0)
             except ValueError:
                 self.errors.append(f"{where}: attempts must be a number")
+            if task["editor"] is None:
+                self.errors.append(f"{where}: editor must be true or false")
+                task["editor"] = True
             if not task["title"]:
                 self.errors.append(f"{where}: title is empty")
             if task["status"] not in STATUSES:
@@ -317,7 +324,8 @@ def _bar(percent: int, review: int = 0, width: int = 20) -> str:
 
 
 def _task_line(t: dict) -> str:
-    return f"{t['id']} [{t['agent']}, {t['size']}] {t['title']} ({t['milestone']})"
+    lane = "editor" if t["editor"] else "headless"
+    return f"{t['id']} [{t['agent']}, {t['size']}, {lane}] {t['title']} ({t['milestone']})"
 
 
 def _no_plan(plan: Plan, as_json: bool) -> int:
@@ -493,6 +501,7 @@ milestone: {milestone}
 status: todo
 agent: {agent}
 size: {size}
+editor: {editor}
 depends: [{depends}]
 attempts: 0
 ---
@@ -533,7 +542,8 @@ def add_milestone(root: Path, title: str) -> int:
     return finish("MILESTONE_ADDED", EXIT_OK, [f"MILESTONE_ADDED: {mid} -> {plan.rel(path)}"])
 
 
-def add_task(root: Path, title: str, milestone: str, agent: str, size: str, depends: list[str]) -> int:
+def add_task(root: Path, title: str, milestone: str, agent: str, size: str, depends: list[str],
+             editor: bool = True) -> int:
     plan = Plan(root)
     if milestone not in {m["id"] for m in plan.milestones}:
         raise LudovantaError(f"unknown milestone '{milestone}'; create it with 'plan add-milestone'")
@@ -548,7 +558,7 @@ def add_task(root: Path, title: str, milestone: str, agent: str, size: str, depe
     tid = plan.next_id("tasks", TASK_FILE_RX, "T-", 3)
     path = folder / f"{tid}.md"
     write_lf(path, TASK_TEMPLATE.format(id=tid, title=title, milestone=milestone, agent=agent.lower(), size=size,
-                                        depends=", ".join(depends)))
+                                        editor="true" if editor else "false", depends=", ".join(depends)))
     return finish("TASK_ADDED", EXIT_OK, [f"TASK_ADDED: {tid} -> {plan.rel(path)}",
                                           "Fill in the goal and the acceptance criteria ('- [ ] ...') before starting it."])
 
@@ -700,7 +710,8 @@ EXECUTOR_RULES = """EXECUTOR RULES
 - Start with: python3 .ludovanta/ludovanta.py plan set {id} --status in-progress --agent <claude|codex>
   (on Windows use python or py -3 if python3 is missing).
 - Meet every criterion, the feel criteria included, at the fidelity and art direction above. For anything the
-  player sees, capture the gameplay camera and look at it.
+  player sees, capture the gameplay camera ('screenshot --label {id}-before' at the start, '{id}-after' at the
+  end, skill ludovanta-screenshot) and look at the images; name the files in the report.
 - Verify: compile, the relevant tests, validate-assets. If a command returns EDITOR_OPEN and you have no Unity MCP
   tools, do not work around it: write "not compiled, Editor open" in the report; the orchestrator verifies.
 - Rules the task adds that can break silently get EditMode tests, as your own check. TESTS_FLAKY means a test

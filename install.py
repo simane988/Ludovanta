@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install or update Ludovanta in a Unity project.
 
-    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.3
+    python3 install.py --project /path/to/MyGame --source https://github.com/me/ludovanta.git --ref v0.1.4
 
 Ownership model that keeps updates free of merge problems:
   * Platform-owned files (.ludovanta/**, <skillTarget>/ludovanta-*/**) are written only by this script.
@@ -317,6 +317,8 @@ def install(project: str, source: str | None, ref: str | None, commit: str | Non
             plan.append(("same", rel))
             continue
         plan.append(("update", rel))
+        if rel.endswith(".meta"):
+            continue   # Unity rewrites .meta files of the editor package itself: not a user's edit
         if rel not in old["files"]:
             conflicts.append((rel, "exists but is not managed by Ludovanta"))
         elif old["files"][rel] != cur:
@@ -326,7 +328,7 @@ def install(project: str, source: str | None, ref: str | None, commit: str | Non
         if rel in desired or not path.is_file():
             continue
         plan.append(("remove", rel))
-        if text_hash(read_file(path)) != old["files"][rel]:
+        if not rel.endswith(".meta") and text_hash(read_file(path)) != old["files"][rel]:
             conflicts.append((rel, "modified locally, removed in the new version"))
 
     # Plan blocks.

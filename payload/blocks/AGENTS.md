@@ -17,7 +17,7 @@ On Windows use `python` (or `py -3`) if `python3` is not available. Every comman
 
 | Command | Purpose |
 |---|---|
-| `status` | Mode (LIVE/HEADLESS), Unity version, whether the Unity Editor executable and Codex are found |
+| `status` | Mode (LIVE/HEADLESS), Unity version, whether the Unity Editor executable, Codex and Orca are found |
 | `compile` | Compile the project in batchmode, list compiler errors as `path:line:col CODE message` |
 | `test [--platform EditMode\|PlayMode] [--filter X] [--category Y] [--repeat N]` | Run tests, list failures; failed tests are rerun once to tell flaky from broken |
 | `test-audit` | Brittle, slow and flaky tests, found without Unity |
@@ -25,6 +25,10 @@ On Windows use `python` (or `py -3`) if `python3` is not available. Every comman
 | `plan [status\|check\|next\|brief\|stats\|add-task\|set\|fail\|close ...]` | Project plan: progress, next tasks, task cards, briefs for fresh sessions and executors, agent statistics, closing a finished plan (skill `ludovanta-plan`) |
 | `codex run T-xxx` / `codex image "..." --out <file>` | Codex CLI as an executor of small tasks and as a reference image generator (skill `ludovanta-codex`) |
 | `feedback add "..."` / `feedback show` | Friction log: what gets in the user's way (skill `ludovanta-feedback`) |
+| `worker start T-xxx [--agent claude\|codex]` / `wait` / `list` / `send T-xxx "..."` / `finish T-xxx` | Executors in Orca, one agent per task: tasks that need the Unity Editor one at a time in the main working copy, the others in parallel worktrees (skill `ludovanta-plan`) |
+| `worktree clean [--dry-run]` | Remove the git worktrees (and branches) whose work is merged into the main branch; the hooks run it on their own (skill `ludovanta-plan`) |
+| `screenshot [--scene X] [--camera C] [--play SEC] [--frames N] [--label L]` | What a camera sees, with the HUD, as PNG: in batchmode or through the open Editor (skill `ludovanta-screenshot`) |
+| `doctor [--offline]` | Unity, git, Python, Claude, Codex, Orca, Unity MCP and the platform itself: what is missing and what to fix first |
 | `hook session-start\|stop` | Called by the Claude Code hooks Ludovanta installs; not for manual use |
 | `update [--ref vX.Y.Z] [--dry-run]` | Update the platform itself (skill `ludovanta-platform-update`) |
 
@@ -76,8 +80,10 @@ that feels like a game in the first minute and looks as polished as the fidelity
   kept in `plan/design.md`. Ask the user about the fidelity instead of defaulting to placeholders.
 - Never present raw greybox (grey capsules and boxes) below the chosen fidelity, and never leave an
   important event as a silent state change: it gets animation, effects, sound or a world reaction.
-- Look at what you built: capture the gameplay camera and check the screenshots, do not judge
-  visuals from code.
+- Look at what you built: `screenshot` the gameplay camera (skill `ludovanta-screenshot`) and open
+  the images, do not judge visuals from code. Visual tasks get a before and an after shot.
+- When something in the environment fails (Unity not found, a license, an agent or Unity MCP missing),
+  run `doctor` and give the user its one next step instead of guessing.
 - A critic reviews the plan before the user sees it and the first playable before it is reported
   (skill `ludovanta-design-review`). Use it too when the user says the game is boring or raw.
 

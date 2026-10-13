@@ -24,11 +24,13 @@ def milestone(project, mid, title):
 
 
 def task(project, tid, milestone="M1", status="todo", size="M", agent="any", depends="", criteria=("Works",),
-         attempts=0, title=None):
+         attempts=0, title=None, editor=None):
     body = "".join(f"- [ ] {c}\n" for c in criteria)
+    lane = f"editor: {editor}\n" if editor is not None else ""
     write(project / f"plan/tasks/{tid}.md",
           f"---\nid: {tid}\ntitle: {title or 'Task ' + tid}\nmilestone: {milestone}\nstatus: {status}\n"
-          f"agent: {agent}\nsize: {size}\ndepends: [{depends}]\nattempts: {attempts}\n---\n\n## Criteria\n{body}")
+          f"agent: {agent}\nsize: {size}\n{lane}depends: [{depends}]\nattempts: {attempts}\n---\n\n"
+          f"## Criteria\n{body}")
 
 
 def header(project, tid):
@@ -70,10 +72,12 @@ def test_init_and_add(game):
     assert cli(game, "add-milestone", "--title", "Ядро вождения")[1].startswith("MILESTONE_ADDED: M1")
     assert "T-001" in cli(game, "add-task", "--milestone", "M1", "--title", "Машина едет")[1]
     code, out = cli(game, "add-task", "--milestone", "M1", "--title", "Камера", "--depends", "T-001",
-                    "--agent", "Codex", "--size", "s")
+                    "--agent", "Codex", "--size", "s", "--headless")
     assert code == 0 and "T-002" in out, out
     assert header(game, "T-002") == {"id": "T-002", "title": "Камера", "milestone": "M1", "status": "todo",
-                                     "agent": "codex", "size": "S", "depends": "[T-001]", "attempts": "0"}
+                                     "agent": "codex", "size": "S", "editor": "false", "depends": "[T-001]",
+                                     "attempts": "0"}
+    assert header(game, "T-001")["editor"] == "true", "a task needs the Editor unless it says otherwise"
 
 
 def test_init_creates_design_template(game):
@@ -121,8 +125,8 @@ def test_status_text(planned):
     code, out = cli(planned)
     assert code == 0, out
     assert "overall [########++..........] 40% done (+10% in review)" in out
-    assert "waiting for the user's review:\n  T-002 [any, S] Task T-002 (M1)" in out
-    assert "next (ready to start):\n  T-003 [codex, S]" in out
+    assert "waiting for the user's review:\n  T-002 [any, S, editor] Task T-002 (M1)" in out
+    assert "next (ready to start):\n  T-003 [codex, S, editor]" in out
 
 
 def test_status_prints_non_ascii(game):
@@ -172,12 +176,13 @@ def test_check_ok_with_warnings(planned):
     (lambda p: task(p, "T-001", depends="T-404"), "depends on unknown task 'T-404'"),
     (lambda p: task(p, "T-001", status="doing"), "unknown status 'doing'"),
     (lambda p: task(p, "T-001", size="XL"), "unknown size 'XL'"),
+    (lambda p: task(p, "T-001", editor="maybe"), "editor must be true or false"),
     (lambda p: task(p, "T-001", status="in-progress", criteria=()), "status 'in-progress' but no acceptance criteria"),
     (lambda p: (task(p, "T-001", depends="T-002"), task(p, "T-002", depends="T-001")), "dependency cycle: T-001 -> T-002 -> T-001"),
     (lambda p: write(p / "plan/tasks/T-001.md", "---\nid: T-002\ntitle: x\n---\n"), "does not match the file name"),
     (lambda p: write(p / "plan/tasks/T-001.md", "id: T-001\n"), "no header"),
     (lambda p: write(p / "plan/tasks/notes.md", "x"), "unexpected file name"),
-], ids=["milestone", "dependency", "status", "size", "started-without-criteria", "cycle", "id-mismatch",
+], ids=["milestone", "dependency", "status", "size", "editor", "started-without-criteria", "cycle", "id-mismatch",
         "no-header", "file-name"])
 def test_check_problems(game, setup, expected):
     milestone(game, "M1", "Driving")

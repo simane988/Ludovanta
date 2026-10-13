@@ -27,6 +27,18 @@ Codex reads the same rules as Claude: `AGENTS.md` with the Ludovanta block, and 
 skills in `.agents/skills` (in `skillTargets` of `ludovanta.json`; `status` warns when it is missing).
 The same applies when the user works with Codex directly, for example in Orca.
 
+When Orca is running (`status`), give a task to Codex with `worker start T-012 --agent codex`: Codex
+then works in Orca, visible to the user, and the orchestrator follows it with `worker wait` and ends it
+with `worker finish` (skill `ludovanta-plan`). Codex suits tasks with `editor: false`, which run in
+their own worktree; tasks that need the Unity Editor go to Claude unless Codex has Unity MCP. Codex
+does not commit there: its sandbox keeps `.git` read-only, and a worktree's git data lives in the main
+folder's `.git`; `worker finish` commits for it. Orca starts Codex with its own settings; when
+`codex.sandbox` or `codex.model` is set in `ludovanta.json` (per machine: `ludovanta.local.json`),
+`worker start` starts `codex --sandbox ... --model ...` with them instead. If Codex in a worktree
+cannot run Unity or write what it needs, set `"codex": {"sandbox": "danger-full-access"}` in
+`ludovanta.local.json`: the worktree is a separate checkout, but this lifts the sandbox completely. `codex run` below is for
+when Orca is not available.
+
 ```
 python3 .ludovanta/ludovanta.py codex run T-012 [--model <id>] [--timeout 3600] [--json]
 ```

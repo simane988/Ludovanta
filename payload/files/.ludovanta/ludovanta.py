@@ -11,6 +11,10 @@ Managed by Ludovanta - do not edit in a game project, changes are overwritten on
     python3 .ludovanta/ludovanta.py plan [status|check|next|brief|stats|init|add-milestone|add-task|set|fail|close]
     python3 .ludovanta/ludovanta.py codex run T-001 | codex image --out Art/References/x.png "description"
     python3 .ludovanta/ludovanta.py feedback add "what gets in the way" [--doing "..."] [--severity 1|2|3] | feedback show
+    python3 .ludovanta/ludovanta.py worker start T-001 [--agent claude|codex] | wait | list | send T-001 "..." | finish T-001
+    python3 .ludovanta/ludovanta.py worktree clean [--dry-run]   # remove worktrees whose work is merged
+    python3 .ludovanta/ludovanta.py screenshot [--scene X.unity] [--camera NAME] [--play SEC] [--frames N] [--label L]
+    python3 .ludovanta/ludovanta.py doctor [--offline]     # is everything the agents need in place, what to fix first
     python3 .ludovanta/ludovanta.py hook session-start|stop    # called by Claude Code hooks (stdin: hook JSON)
     python3 .ludovanta/ludovanta.py update [--ref vX.Y.Z] [--dry-run] [--force]
 
@@ -88,6 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--agent", default="any", help="claude, codex, any, or a person (default: any)")
     q.add_argument("--size", default="M", help="S, M or L (default: M)")
     q.add_argument("--depends", nargs="*", default=[], help="task ids this task needs")
+    q.add_argument("--headless", action="store_true",
+                   help="the task needs no Unity Editor (code, data, EditMode tests): it may run in a parallel worktree")
     q = plan.add_parser("set", help="change a task's status or agent")
     q.add_argument("task")
     q.add_argument("--status", choices=["todo", "in-progress", "review", "done", "blocked", "dropped"])
@@ -128,6 +134,53 @@ def build_parser() -> argparse.ArgumentParser:
     q = fb.add_parser("show", help="entries of the last days, most severe first")
     q.add_argument("--days", type=int, default=7, help="how many days back (default 7, 0 = all)")
     q.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("worker", help="executors in Orca: one worktree and agent per task (skill ludovanta-plan)")
+    wk = p.add_subparsers(dest="worker_command", required=True)
+    q = wk.add_parser("start", help="create an Orca worktree with an agent working on the task")
+    q.add_argument("task")
+    q.add_argument("--agent", choices=["claude", "codex"], help="default: the card's agent, or claude")
+    q.add_argument("--json", action="store_true")
+    q = wk.add_parser("wait", help="wait until an executor finishes or stops; print its report")
+    q.add_argument("tasks", nargs="*", help="task ids (default: every executor)")
+    q.add_argument("--timeout", type=int, default=540, help="seconds (default 540, under an agent's tool limit)")
+    q.add_argument("--poll", type=float, default=15, help=argparse.SUPPRESS)
+    q.add_argument("--json", action="store_true")
+    q = wk.add_parser("list", help="every executor and where it stands, without waiting")
+    q.add_argument("--json", action="store_true")
+    q = wk.add_parser("send", help="type a message into the executor's agent (an answer, a correction)")
+    q.add_argument("task")
+    q.add_argument("text")
+    q.add_argument("--json", action="store_true")
+    q = wk.add_parser("finish", help="merge the executor's branch into the current branch, remove its worktree")
+    q.add_argument("task")
+    q.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("worktree", help="git worktrees of parallel executors")
+    wt = p.add_subparsers(dest="worktree_command", required=True)
+    q = wt.add_parser("clean", help="remove worktrees (and their branches) whose work is merged into the main branch")
+    q.add_argument("--dry-run", action="store_true", help="only show what would be removed and why the rest is kept")
+    q.add_argument("--background", action="store_true", help=argparse.SUPPRESS)   # started by the hooks
+    q.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("screenshot", help="capture what a camera sees (with the HUD) to PNG, headless or in the open "
+                                          "Editor (skill ludovanta-screenshot)")
+    p.add_argument("--scene", help="scene to open in batchmode (default: the first enabled scene in Build Settings); "
+                                   "in the open Editor it must be the open scene")
+    p.add_argument("--camera", help="camera GameObject name (default: Camera.main)")
+    p.add_argument("--play", type=float, default=0.0, metavar="SEC",
+                   help="enter Play mode and wait SEC seconds first (cameras and HUD made at runtime)")
+    p.add_argument("--frames", type=int, default=1, help="in Play mode: a series of N frames (motion, animation)")
+    p.add_argument("--every", type=float, default=0.25, metavar="SEC", help="seconds between frames (default 0.25)")
+    p.add_argument("--size", default="1280x720", help="WIDTHxHEIGHT (default 1280x720)")
+    p.add_argument("--label", help="file name, e.g. T-012-before / T-012-after (default: scene and time)")
+    p.add_argument("--out", help="project-relative PNG path instead of Logs/ludovanta/screenshots/")
+    p.add_argument("--timeout", type=int, help="seconds (default 900 headless, 60 in the open Editor, plus --play)")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("doctor", help="check Unity, git, Python, the agents, Unity MCP and the platform; what to fix first")
+    p.add_argument("--offline", action="store_true", help="do not ask the platform source for a newer version")
+    p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("hook", help="Claude Code hook entry point (installed into .claude/settings.json)")
     p.add_argument("event", choices=["session-start", "stop"])
@@ -190,7 +243,8 @@ def main(argv: list[str] | None = None) -> int:
             if pc == "add-milestone":
                 return plan.add_milestone(root, args.title)
             if pc == "add-task":
-                return plan.add_task(root, args.title, args.milestone, args.agent, args.size, args.depends)
+                return plan.add_task(root, args.title, args.milestone, args.agent, args.size, args.depends,
+                                     not args.headless)
             if pc == "set":
                 return plan.set_task(root, args.task, args.status, args.agent, args.unverified)
             if pc == "fail":
@@ -211,6 +265,30 @@ def main(argv: list[str] | None = None) -> int:
             if args.feedback_command == "add":
                 return feedback.add(root, args.problem, args.doing, args.severity)
             return feedback.show(root, args.days, args.json)
+        if args.command == "worker":
+            from ludovanta_lib import orca
+            wc = args.worker_command
+            if wc == "start":
+                return orca.start(root, args.task, args.agent, args.json)
+            if wc in ("wait", "list"):
+                tasks = args.tasks if wc == "wait" else []
+                timeout = args.timeout if wc == "wait" else 0
+                return orca.wait(root, tasks, timeout, args.poll if wc == "wait" else 0, args.json)
+            if wc == "send":
+                return orca.send(root, args.task, args.text, args.json)
+            return orca.finish_worker(root, args.task, args.json)
+        if args.command == "worktree":
+            from ludovanta_lib import worktrees
+            if args.background:
+                return worktrees.background_clean(root)
+            return worktrees.clean(root, args.dry_run, args.json)
+        if args.command == "screenshot":
+            from ludovanta_lib import screenshot
+            return screenshot.screenshot(root, args.scene, args.camera, args.play, args.frames, args.every, args.size,
+                                         args.out, args.label, args.timeout, args.json)
+        if args.command == "doctor":
+            from ludovanta_lib import doctor
+            return doctor.doctor(root, args.offline, args.json)
         if args.command == "hook":
             from ludovanta_lib import hooks
             return hooks.run(root, args.event)

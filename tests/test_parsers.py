@@ -87,3 +87,12 @@ def test_test_cases_with_inherited_categories(tmp_path):
     assert r["cases"] == [{"name": "A.B", "result": "Failed", "categories": ["Flaky", "Slow"], "duration": 0.25},
                           {"name": "A.C", "result": "Passed", "categories": ["Slow"], "duration": 0.0}]
     assert r["failures"][0]["categories"] == ["Flaky", "Slow"]
+
+
+def test_durations_in_a_comma_locale(tmp_path):
+    """Unity on a Windows with Russian regional settings writes '0,0331029'."""
+    xml = tmp_path / "r.xml"
+    xml.write_text('<?xml version="1.0"?><test-run total="1" passed="1" failed="0" duration="2,5">'
+                   '<test-case fullname="A.B" result="Passed" duration="1,25" /></test-run>', encoding="utf-8")
+    r = parsers.test_results(xml, ROOT)
+    assert r["duration"] == 2.5 and r["cases"][0]["duration"] == 1.25

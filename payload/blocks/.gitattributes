@@ -1,6 +1,7 @@
 # Ludovanta: platform files always use LF, so checkouts are identical on every OS
 /.ludovanta/** text eol=lf
 /ludovanta.json text eol=lf
+/Packages/com.ludovanta.editor/** text eol=lf
 {{SKILL_EOL_RULES}}
 # Ludovanta: the friction log is append-only; merging branches keeps the entries of both
 /docs/feedback-log.md merge=union

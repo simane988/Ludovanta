@@ -86,11 +86,12 @@ Pick what the design needs; do not add everything.
 You cannot judge feel and looks from code. Capture what the player sees, from the gameplay camera
 with the HUD, and look at the images:
 
-- Live mode: enter Play mode and capture the Game camera with a Unity MCP tool (for example
-  `Unity_Camera_Capture`). A Scene view capture shows the level, not the player's view.
-- Headless mode: a PlayMode test that loads the scene, drives the player with simulated input, renders
-  the main camera into a `RenderTexture` and writes PNGs to `Logs/ludovanta/shots/` (generated,
-  not committed).
+- `python3 .ludovanta/ludovanta.py screenshot --play 3` works in both modes (skill
+  `ludovanta-screenshot`): headless in batchmode, or through the open Editor. A Scene view capture
+  shows the level, not the player's view.
+- A moment that needs the player to act (a jump, a hit, a ride): a PlayMode test that loads the
+  scene, drives the player with simulated input, renders the main camera into a `RenderTexture` and
+  writes PNGs to `Logs/ludovanta/screenshots/` (generated, not committed).
 
 Look after every visible change and at least once per milestone: framing, readability, contrast,
 clipping, whether the effect is visible at gameplay distance, whether the HUD covers the action.

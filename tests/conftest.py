@@ -13,6 +13,22 @@ import pytest
 from helpers import INSTALL, IS_WINDOWS, REPO, TESTS, git, run_py, write
 
 
+@pytest.fixture(autouse=True)
+def isolated_machine(monkeypatch, tmp_path):
+    """Tests leave nothing running on the developer's machine.
+
+    - No Orca: they never talk to a running Orca app (test_orca.py uses fake_orca_env).
+    - No git fsmonitor: Git for Windows can enable core.fsmonitor system-wide, and then every git command starts a
+      daemon per test repo and worktree. It lives as long as the folder, and pytest keeps the folders of the last
+      three runs: over a thousand daemons, enough to exhaust the machine's memory.
+      GIT_CONFIG_* reaches every git started by the tests, Ludovanta and the fakes.
+    """
+    monkeypatch.setenv("ORCA_PATH", str(tmp_path / "no-orca"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
+
+
 @pytest.fixture
 def make_project(tmp_path):
     """Factory for a minimal Unity project (optionally a git repo with one commit)."""
@@ -101,6 +117,19 @@ def fake_unity_env(tmp_path) -> dict:
 def fake_codex_env(tmp_path) -> dict:
     """Env that points Ludovanta at tests/fake_codex.py instead of the Codex CLI (mode via FAKE_CODEX_MODE)."""
     return {"CODEX_PATH": str(_launcher(tmp_path, TESTS / "fake_codex.py"))}
+
+
+@pytest.fixture
+def fake_orca_env(tmp_path, monkeypatch) -> Path:
+    """Points Ludovanta at tests/fake_orca.py; returns the fake app's state file."""
+    state = tmp_path / "orca" / "state.json"
+    state.parent.mkdir()
+    monkeypatch.setenv("ORCA_PATH", str(_launcher(tmp_path, TESTS / "fake_orca.py")))
+    monkeypatch.setenv("FAKE_ORCA_STATE", str(state))
+    for who in ("AUTHOR", "COMMITTER"):   # 'worker start' and 'worker finish' commit in the project
+        monkeypatch.setenv(f"GIT_{who}_NAME", "ludovanta-test")
+        monkeypatch.setenv(f"GIT_{who}_EMAIL", "ludovanta@test.local")
+    return state
 
 
 _HOLDER = r"""
