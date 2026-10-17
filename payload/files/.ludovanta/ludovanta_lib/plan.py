@@ -170,6 +170,7 @@ class Plan:
             task = {
                 "id": f["id"], "title": f.get("title", ""), "milestone": f.get("milestone", ""),
                 "status": f.get("status", "todo").lower(), "agent": (f.get("agent") or "any").lower(),
+                "assigned": f.get("assigned", ""),
                 "size": (f.get("size") or "M").upper(), "depends": parse_list(f.get("depends", "")),
                 # Needs the Unity Editor (scenes, prefabs, visuals, Play mode): one at a time in the main working
                 # copy. A missing field means yes, the safe default; 'false' lets the task run in a parallel worktree.

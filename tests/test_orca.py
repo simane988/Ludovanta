@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,127 @@ def card(project, tid, status="todo", depends="", agent="any", criteria="- [ ] T
           f"---\nid: {tid}\ntitle: Fare meter {tid}\nmilestone: M1\nstatus: {status}\nagent: {agent}\nsize: S\n"
           f"editor: {editor}\ndepends: [{depends}]\nattempts: 0\n---\n\n## Goal\nFare.\n\n"
           f"## Acceptance criteria\n{criteria}\n")
+
+
+def assignment_config(game, **values):
+    write(game / "ludovanta.local.json", json.dumps(values))
+
+
+@pytest.mark.parametrize("pinned, override, expected, weighted", [
+    ("any", None, "codex", True), ("claude", None, "claude", False),
+    ("codex", "claude", "claude", False), ("any", "claude", "claude", False)])
+def test_weighted_start_precedence_and_committed_cards(game, fake_orca_env, pinned, override, expected, weighted):
+    assignment_config(game, agentWeights={"claude": 0, "codex": 1})
+    card(game, "T-001", agent=pinned)
+    if pinned != "any":
+        git(game, "commit", "--quiet", "-am", "pin")
+    code, out = cli(game, "worker", "start", "T-001", *(["--agent", override] if override else []))
+    assert code == 0 and out["agent"] == expected, out
+    for root in (game, Path(out["path"])):
+        contents = read(root / "plan/tasks/T-001.md")
+        assert f"agent: {expected}" in contents and "status: in-progress" in contents
+        assert ("assigned: weights" in contents) == weighted
+        committed = git(root, "show", "HEAD:plan/tasks/T-001.md").stdout
+        assert ("assigned: weights" in committed) == weighted
+    if weighted:
+        assert out["shares"]["codex"] == {"work": 0, "weight": 1, "after": 1}
+        assert "picked codex" in " ".join(out["notes"])
+    else:
+        assert out["shares"] == {}
+
+
+def test_no_weights_preserves_default(game):
+    code, out = cli(game, "worker", "start", "T-001")
+    assert code == 0 and out["agent"] == "claude"
+    assert "assigned:" not in read(game / "plan/tasks/T-001.md")
+
+
+def test_successive_starts_count_the_plan_cards(game, fake_orca_env):
+    assignment_config(game, agentWeights={"claude": 1, "codex": 1})
+    for tid in ("T-005", "T-006"):
+        card(game, tid)
+    git(game, "add", "--", "plan")
+    git(game, "commit", "--quiet", "-m", "more tasks")
+    chosen = []
+    for tid in ("T-001", "T-005", "T-006"):
+        code, out = cli(game, "worker", "start", tid)
+        assert code == 0, out
+        chosen.append(out["agent"])
+    assert chosen == ["claude", "codex", "claude"]
+    assert out["shares"]["claude"]["work"] == out["shares"]["codex"]["work"] == 1
+
+
+def test_invalid_weights_start_nothing(game, fake_orca_env):
+    assignment_config(game, agentWeights={"claude": 1, "gemini": 1})
+    before = (game / "plan/tasks/T-001.md").read_bytes()
+    code, text = run_py(CLI, "--project", str(game), "worker", "start", "T-001")
+    assert code == 2 and "agentWeights" in text and "gemini" in text
+    assert (game / "plan/tasks/T-001.md").read_bytes() == before
+    assert not orca_state(fake_orca_env)["agents"] and not orca_state(fake_orca_env)["worktrees"]
+    assert not any(c[:2] in (["terminal", "create"], ["worktree", "create"])
+                   for c in orca_state(fake_orca_env)["calls"])
+
+
+def test_weighted_start_prints_the_pick_and_both_shares(game):
+    assignment_config(game, agentWeights={"claude": 1, "codex": 1})
+    code, text = run_py(CLI, "--project", str(game), "worker", "start", "T-001")
+    assert code == 0, text
+    assert "agentWeights picked claude" in text
+    assert "claude: (0 + 1) / 1" in text and "codex: (0 + 1) / 1" in text
+
+
+@pytest.mark.parametrize("pinned, missing, zero", [(False, False, False), (False, False, True),
+    (False, True, True), (True, True, False), (True, False, False)])
+def test_unavailable_agents(game, fake_orca_env, monkeypatch, pinned, missing, zero):
+    assignment_config(game, agentWeights={"claude": 0 if zero else 1, "codex": 10})
+    if pinned:
+        card(game, "T-001", agent="codex")
+        git(game, "commit", "--quiet", "-am", "pin")
+    if missing:
+        monkeypatch.setenv("CODEX_PATH", str(game / "absent"))
+    monkeypatch.setenv("FAKE_CODEX_MODE", "fail")
+    before = (game / "plan/tasks/T-001.md").read_bytes()
+    head = git(game, "rev-parse", "HEAD").stdout
+    code, out = cli(game, "worker", "start", "T-001")
+    if pinned or zero:
+        assert code == 2 and out["status"] == "AGENT_UNAVAILABLE", out
+        assert (game / "plan/tasks/T-001.md").read_bytes() == before
+        assert git(game, "rev-parse", "HEAD").stdout == head
+        assert not any(c[:2] in (["terminal", "create"], ["worktree", "create"])
+                       for c in orca_state(fake_orca_env)["calls"])
+        if zero:
+            assert "weight zero" in " ".join(out["notes"]) and "--agent claude" in " ".join(out["notes"])
+    else:
+        assert code == 0 and out["agent"] == "claude", out
+        assert "codex login" in " ".join(out["notes"])
+
+
+@pytest.mark.parametrize("unity, weights, pinned, override, expected, note", [
+    ({"claude": True, "codex": False}, {"claude": 1, "codex": 2}, "any", None, "claude", "left out"),
+    ({"claude": True, "codex": True}, {"claude": 1, "codex": 2}, "any", None, "codex", "picked"),
+    ({"claude": False, "codex": False}, {"claude": 1, "codex": 2}, "any", None, "codex", "HEADLESS"),
+    ({"claude": True, "codex": False}, {"claude": 0, "codex": 1}, "any", None, "codex", "HEADLESS"),
+    ({"claude": True, "codex": False}, {"claude": 1, "codex": 1}, "codex", None, "codex", "HEADLESS"),
+    ({"claude": True, "codex": False}, {"claude": 1, "codex": 1}, "any", "codex", "codex", "HEADLESS")])
+def test_editor_assignment(game, unity, weights, pinned, override, expected, note):
+    assignment_config(game, agentWeights=weights, unityMcp=unity)
+    if pinned != "any":
+        card(game, "T-003", agent=pinned, editor="true")
+        git(game, "commit", "--quiet", "-am", "pin editor")
+    code, out = cli(game, "worker", "start", "T-003", *(["--agent", override] if override else []))
+    assert code == 0 and out["agent"] == expected, out
+    assert note in " ".join(out["notes"])
+    assert ("assigned: weights" in read(game / "plan/tasks/T-003.md")) == (pinned == "any" and not override)
+    if note == "HEADLESS":
+        assert "Editor closed" in " ".join(out["notes"])
+
+
+def test_unusable_agents_unity_mcp_does_not_restrict_the_pick(game, monkeypatch):
+    assignment_config(game, agentWeights={"claude": 1, "codex": 1}, unityMcp={"claude": False, "codex": True})
+    monkeypatch.setenv("FAKE_CODEX_MODE", "fail")
+    code, out = cli(game, "worker", "start", "T-003")
+    assert code == 0 and out["agent"] == "claude", out
+    assert "HEADLESS" in " ".join(out["notes"])
 
 
 @pytest.fixture
@@ -654,3 +776,100 @@ def test_blocked_executor_is_in_the_waiting_block(game, fake_orca_env):
     assert code == 0 and "BLOCKED" in text
     block = text[text.index("WAITING FOR THE USER"):]
     assert "1. T-001 Fare meter T-001" in block and "Which car should I use?" in block
+
+
+@pytest.mark.parametrize("approval", ["untrusted", "on-failure", "on-request", "never"])
+@pytest.mark.parametrize("extra", [{}, {"sandbox": "danger-full-access", "model": "gpt-x"}])
+def test_codex_approval(game, fake_orca_env, approval, extra):
+    assignment_config(game, codex={"approval": approval, **extra})
+    code, out = cli(game, "worker", "start", "T-001", "--agent", "codex")
+    assert code == 0, out
+    agent = agents(fake_orca_env)[-1]
+    assert agent["command"].endswith(f"--ask-for-approval {approval}")
+    assert "plan brief T-001" in agent["sent"][0]
+
+
+@pytest.mark.parametrize("approval", ["always", "", None, False, []])
+def test_invalid_approval_does_not_commit_or_start(game, fake_orca_env, approval):
+    assignment_config(game, codex={"approval": approval})
+    head = git(game, "rev-parse", "HEAD").stdout
+    before = read(game / "plan/tasks/T-001.md")
+    code, text = run_py(CLI, "--project", str(game), "worker", "start", "T-001", "--agent", "codex")
+    assert code == 2 and "codex.approval" in text
+    assert all(value in text for value in ("untrusted", "on-failure", "on-request", "never"))
+    assert git(game, "rev-parse", "HEAD").stdout == head
+    assert read(game / "plan/tasks/T-001.md") == before
+    assert not agents(fake_orca_env) and not orca_state(fake_orca_env)["worktrees"]
+
+
+@pytest.mark.parametrize("tid", ["T-001", "T-003"])
+@pytest.mark.parametrize("screen, expected", [("Trust this folder?", "Trust this folder?"),
+    ("Set up the Windows sandbox", "set up its sandbox"), ("Loading", "did not get ready")])
+def test_not_ready_screen_and_resend(game, fake_orca_env, monkeypatch, orca_module, tid, screen, expected):
+    assignment_config(game, codex={"approval": "never"})
+    monkeypatch.setenv("FAKE_ORCA_TUI", "never")
+    monkeypatch.setenv("FAKE_ORCA_SCREEN", screen)
+    code, text = run_py(CLI, "--project", str(game), "worker", "start", tid, "--agent", "codex")
+    assert code == 2 and "AGENT_NOT_READY" in text and expected in text
+    assert "user" in text and "in Orca" in text and f"worker send {tid}" in text
+    assert not agents(fake_orca_env)[-1]["sent"]
+    monkeypatch.delenv("FAKE_ORCA_TUI")
+    code, out = cli(game, "worker", "send", tid)
+    assert code == 0, out
+    lane = "editor" if tid == "T-003" else "worktree"
+    assert agents(fake_orca_env)[-1]["sent"] == [orca_module._prompt(tid, lane)]
+    _, out = cli(game, "worker", "list")
+    assert out["workers"][0]["state"] == "running"
+
+
+@pytest.mark.parametrize("submitted", [True, False])
+def test_watcher_submission_receipt(in_orca, fake_orca_env, submitted):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, state="waiting")
+    set_agent(fake_orca_env, handle="term_me", state="idle", submitted=submitted)
+    assert watch(game) == ["T-001"]
+    call = [c for c in orca_state(fake_orca_env)["calls"] if c[:2] == ["terminal", "send"]][-1]
+    assert "--wait-submit" in call
+    log = read(game / "Logs/ludovanta/worker-watch.log")
+    assert ("woke the orchestrator" in log) == submitted
+    assert ("typed but not confirmed as submitted" in log) == (not submitted)
+    assert watch(game) == [], "accepted input must not be typed twice"
+
+
+def test_watcher_dialog_waits_for_thirty_minutes(in_orca, fake_orca_env, orca_module, monkeypatch):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, state="waiting")
+    set_agent(fake_orca_env, handle="term_me", state="idle", dialog=True)
+    exe = orca_module.find_orca(game)
+    now = time.time()
+    for seconds in range(0, 1801, 15):
+        monkeypatch.setattr(orca_module.time, "time", lambda: now + seconds)
+        assert orca_module._watch_round(game, exe) == []
+    assert not me(fake_orca_env)["sent"]
+    assert not worker_state(game).get("notified")
+    log = read(game / "Logs/ludovanta/worker-watch.log")
+    assert log.count("open dialog") == 7 and "round failed" not in log
+    assert "typing the line anyway" not in log
+    set_agent(fake_orca_env, handle="term_me", dialog=False)
+    assert orca_module._watch_round(game, exe) == ["T-001"]
+
+
+def test_watcher_same_failure_twelve_minutes(in_orca, orca_module, monkeypatch):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    now = time.time()
+    ticks = [now]
+    attempts = []
+    def fail_round(*args):
+        attempts.append(1)
+        raise orca_module.LudovantaError("repeated failure")
+    monkeypatch.setattr(orca_module, "_watch_round", fail_round)
+    monkeypatch.setattr(orca_module.time, "time", lambda: ticks[0])
+    monkeypatch.setattr(orca_module.time, "sleep", lambda seconds: ticks.__setitem__(0, ticks[0] + 15))
+    assert orca_module.watch(game, 49, 0, False) == 0
+    assert len(attempts) == 49
+    assert read(game / "Logs/ludovanta/worker-watch.log").count("round failed: LudovantaError: repeated failure") == 3

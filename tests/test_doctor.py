@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from helpers import read, run_py, write
+from helpers import git, read, run_py, write
 
 
 def doctor(project, *args, env=None):
@@ -71,6 +71,59 @@ def test_preferences_found(installed_project, env):
     write(installed_project / "AGENTS.md", read(installed_project / "AGENTS.md") + "\n## Preferences\n\n- Russian\n")
     _, out = doctor(installed_project, "--offline", env=env)
     assert line(out, "rules").startswith("ok")
+
+
+@pytest.mark.parametrize("weights", [{"claude": 1, "gemini": 1}, None, [1], {"claude": 0}])
+def test_invalid_weights_warn_without_breaking_other_commands(installed_project, env, fake_orca_env, weights):
+    p = installed_project
+    write(p / "ludovanta.local.json", json.dumps({"agentWeights": weights}))
+    cli = p / ".ludovanta/ludovanta.py"
+    code, out = run_py(cli, "status", "--json", env=env)
+    assert code == 0 and json.loads(out)["status"] == "HEADLESS", out
+    code, out = doctor(p, "--offline", "--json", env=env)
+    data = json.loads(out)
+    assert code == 0 and data["status"] == "DOCTOR_WARN", out
+    check = next(c for c in data["checks"] if c["check"] == "agent weights")
+    assert check["level"] == "warn" and "agentWeights" in check["detail"]
+    assert not any("check itself failed" in c["detail"] for c in data["checks"])
+    assert any(c["check"] == "assignment claude" for c in data["checks"])
+    write(p / "plan/milestones/M1.md", "---\nid: M1\ntitle: Driving\n---\n")
+    write(p / "plan/tasks/T-001.md", "---\nid: T-001\ntitle: Fare\nmilestone: M1\nstatus: todo\n"
+          "agent: any\nsize: S\neditor: false\n---\n\n- [ ] Fare is shown\n")
+    git(p, "add", "--", "plan")
+    git(p, "commit", "--quiet", "-m", "plan")
+    code, out = run_py(cli, "worker", "start", "T-001", env=env)
+    assert code == 2 and check["detail"] in out, out
+    assert "status: todo" in read(p / "plan/tasks/T-001.md")
+    state = json.loads(read(fake_orca_env))
+    assert not state["agents"] and not state["worktrees"]
+
+
+@pytest.mark.parametrize("weights", [None, {"claude": 2, "codex": 1}])
+def test_assignment_report_and_read_only_sources(installed_project, env, weights):
+    from pathlib import Path
+    p = installed_project
+    mcp = p / ".mcp.json"
+    user = Path.home() / ".claude.json"
+    write(mcp, '{"mcpServers": {"unity-mcp": {"command": "relay"}}}')
+    write(user, '{}')
+    before = {path: path.read_bytes() for path in (mcp, user)}
+    cfg = {"unityMcp": {"codex": False}}
+    if weights is not None:
+        cfg["agentWeights"] = weights
+    write(p / "ludovanta.local.json", json.dumps(cfg))
+    code, out = doctor(p, "--offline", env=env)
+    assert code == 0, out
+    assert "usable: yes" in line(out, "assignment claude")
+    assert "usable: yes" in line(out, "assignment codex")
+    assert "Unity MCP: yes" in line(out, "assignment claude") and str(mcp) in out
+    assert "Unity MCP: no" in line(out, "assignment codex") and "unityMcp.codex" in out
+    if weights is None:
+        assert "agentWeights not set" in line(out, "agent weights")
+    else:
+        assert json.dumps(weights) in line(out, "agent weights")
+        assert "Editor tasks go to claude" in out
+    assert all(path.read_bytes() == data for path, data in before.items())
 
 
 def test_newer_version_available(installed_project, env, origin):

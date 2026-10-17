@@ -102,23 +102,13 @@ public API), decisions and gotchas the dependent tasks need. 'plan brief' passes
 
 ## Splitting tasks between agents
 
-The project's rules for who does what are in `AGENTS.md`, outside the Ludovanta block (a heading such
-as `## Preferences`). Follow them when you set `agent` on new cards. Without project rules, start from
-these defaults; they are a hypothesis, not a law:
-
-- `codex`: small (S), self-contained code with clear criteria that needs no Unity Editor or scene
-  work: a calculator or data class with its EditMode tests, a parser, a config, an editor utility
-  (skill `ludovanta-codex`).
-- `claude`: scene and prefab wiring, anything that needs Unity MCP, game feel and visuals that must
-  be judged on screenshots, tasks whose criteria still need refining.
-- `any`: either fits; leave it when unsure.
-
-The rules are revised from data, not impressions. Every finished card records its executor and its
-failed attempts. When the user asks how the agents compare, at a plan's retrospective, or after two or
-three weeks of work, run `plan stats`: per agent, how many tasks were accepted, how many on the first
-try, failed attempts per task, how many hit the stop, by size. Show it in a few lines, propose one or two
-rule changes ("Codex fails M tasks: give it only S"), and after the user agrees write them into the
-preferences in `AGENTS.md`.
+The project's own rules in `AGENTS.md` win. Otherwise pin an agent only for an ability the other
+lacks (today: image generation, Codex). Leave everything else `agent: any`, Editor tasks included:
+`worker start` uses `agentWeights` and detects each agent's Unity MCP for this project. Without weights,
+`any` goes to Claude. Use `plan stats` (results, failed attempts and sizes per agent) to propose weight
+adjustments. If a pick does not fit, restart with `worker start T-xxx --agent claude|codex` after ending
+the existing executor. `AGENT_UNAVAILABLE`: fix login/installation or weights, or override with `--agent`;
+a zero weight is never overridden by the weighted pick. Ludovanta never configures Unity MCP.
 
 ## Planning: breaking a goal down
 
@@ -172,8 +162,8 @@ comes back.
 Orchestrator, for each task (`plan next`, or the one the user named):
 
 1. Pick where the executor runs. `status` says whether Orca is running.
-   - **Orca running** (the usual case): `worker start T-xxx [--agent claude|codex]` (the card's `agent`;
-     otherwise `claude`; `--agent` overrides the card). `WORKER_STARTED` means it committed the card
+   - **Orca running** (the usual case): `worker start T-xxx [--agent claude|codex]` (the pinned `agent`,
+     else `agentWeights` for `any`, else Claude; `--agent` overrides both). `WORKER_STARTED` means it committed the card
      as in-progress, recorded the agent and started it in Orca, so the user sees every executor there.
      The card's `editor` field picks the lane:
      - `editor: true` (default): a new agent terminal in the main working copy, where the Editor and Unity MCP
@@ -187,8 +177,7 @@ Orchestrator, for each task (`plan next`, or the one the user named):
      linked worktree. Resolve the listed reasons in the main working copy before retrying.
      `WORKER_EXISTS`: inspect the existing executor with `worker list`; send it instructions or finish
      it instead of starting a duplicate. `EDITOR_BUSY`: finish the named Editor executor first;
-     ready worktree tasks can still start. `AGENT_NOT_READY`: inspect the terminal for login or trust
-     prompts; once ready, give it the task by hand with `worker send` as the command explains.
+     ready worktree tasks can still start. `AGENT_NOT_READY`: the user answers Codex folder-trust or sandbox setup dialogs in Orca; then `worker send T-xxx` without text sends the task prompt.
    - **No Orca** (`ORCA_UNAVAILABLE`, plan unchanged): `codex` -> `ludovanta.py codex run T-xxx`
      (skill `ludovanta-codex`); `claude` or
      `any` -> a subagent (Claude Code: the Agent tool, general-purpose) with only this prompt: "You

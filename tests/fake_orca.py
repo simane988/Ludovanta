@@ -104,6 +104,9 @@ def main():
             error = "timeout"
         else:
             result = {"wait": {"satisfied": True}}
+    elif cmd == "terminal read":
+        a = next(a for a in state["agents"] if a["handle"] == arg(args, "--terminal"))
+        result = {"terminal": {"tail": a.get("tail", os.environ.get("FAKE_ORCA_SCREEN", "").splitlines())}}
     elif cmd == "terminal list":
         path = selector_path(state, arg(args, "--worktree"))
         result = {"terminals": [{"handle": a["handle"], "agentIdentity": a["agentType"], "paneKey": a["paneKey"],
@@ -111,9 +114,13 @@ def main():
                                 for a in state["agents"] if norm(a["path"]) == norm(path)]}
     elif cmd == "terminal send":
         a = next(a for a in state["agents"] if a["handle"] == arg(args, "--terminal"))
-        a["sent"].append(arg(args, "--text"))
-        a["state"] = "working"
-        result = {"accepted": True}
+        if a.get("dialog"):
+            error = "agent_prompt_blocked"
+        else:
+            a["sent"].append(arg(args, "--text"))
+            a["state"] = "working"
+            result = {"send": {"accepted": True, "prompt": {"stages": ["input_accepted"]
+                      + (["turn_started"] if a.get("submitted", True) else [])}}}
     elif cmd == "terminal close":
         state["agents"] = [a for a in state["agents"] if a["handle"] != arg(args, "--terminal")]
         result = {"close": {"handle": arg(args, "--terminal")}}

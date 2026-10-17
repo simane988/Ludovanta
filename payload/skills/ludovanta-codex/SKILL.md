@@ -1,9 +1,9 @@
 ---
 name: ludovanta-codex
-description: Use the OpenAI Codex CLI as a second agent - as the executor of small plan tasks (agent: codex) and to generate reference images (concept art, mood, characters, UI mockups) with its built-in image generation. Use when a task card says agent codex, when the user asks to give work to Codex, or when the art direction needs visual references.
+description: Use the OpenAI Codex CLI as a plan task executor and to generate reference images (concept art, mood, characters, UI mockups) with its built-in image generation. Use when a task card says agent codex, when the user asks to give work to Codex, or when the art direction needs visual references.
 ---
 
-# Codex: an executor for small tasks and a reference image generator
+# Codex: a task executor and a reference image generator
 
 The orchestrator (usually Claude, see "Running the plan" in `ludovanta-plan`) stays in charge: it
 picks the tasks, verifies the results and talks to the user. Codex works through `codex exec`
@@ -16,12 +16,10 @@ silently to get around it; ask the user.
 
 ## Tasks for Codex
 
-Good fits: size S, plain code with clear criteria, no Unity Editor or scene work needed - a
-calculator or data class with its EditMode tests, a parser, a ScriptableObject config, an editor
-utility, a refactor inside a few files, shader code to a written spec. Poor fits: scene and prefab
-wiring, anything that needs Unity MCP, judging how something looks or feels, tasks whose criteria
-are vague. Mark them in the plan with `agent: codex`. The project's own split rules in `AGENTS.md`
-win over this list (skill `ludovanta-plan`, "Splitting tasks between agents").
+The project's own rules in `AGENTS.md` win. Otherwise pin only for an ability the other agent lacks
+(today: image generation, Codex). Leave everything else `agent: any`, Editor tasks included: `worker
+start` uses `agentWeights` and detects Unity MCP per agent. Use `plan stats` to adjust weights; if a
+pick does not fit, end the existing executor and restart with `worker start T-xxx --agent claude|codex`.
 
 Codex reads the same rules as Claude: `AGENTS.md` with the Ludovanta block, and the `ludovanta-*`
 skills in `.agents/skills` (in `skillTargets` of `ludovanta.json`; `status` warns when it is missing).
@@ -29,12 +27,15 @@ The same applies when the user works with Codex directly, for example in Orca.
 
 When Orca is running (`status`), give a task to Codex with `worker start T-012 --agent codex`: Codex
 then works in Orca, visible to the user, and the orchestrator follows it with `worker wait` and ends it
-with `worker finish` (skill `ludovanta-plan`). Codex suits tasks with `editor: false`, which run in
-their own worktree; tasks that need the Unity Editor go to Claude unless Codex has Unity MCP. Codex
+with `worker finish` (skill `ludovanta-plan`). Tasks with `editor: false` run in
+their own worktree; Editor tasks prefer eligible agents with Unity MCP. Without it the executor
+gets a warning: it can work only HEADLESS with the Editor closed. Codex
 does not commit there: its sandbox keeps `.git` read-only, and a worktree's git data lives in the main
 folder's `.git`; `worker finish` commits for it. Orca starts Codex with its own settings; when
-`codex.sandbox` or `codex.model` is set in `ludovanta.json` (per machine: `ludovanta.local.json`),
-`worker start` starts `codex --sandbox ... --model ...` with them instead. If Codex in a worktree
+`codex.sandbox`, `codex.model` or `codex.approval` is set in `ludovanta.json` (per machine: `ludovanta.local.json`),
+`worker start` starts `codex --sandbox ... --model ...` with them instead.
+`codex.approval` sets `--ask-for-approval`: `untrusted`, `on-failure`, `on-request` or `never`; no default.
+If Codex in a worktree
 cannot run Unity or write what it needs, set `"codex": {"sandbox": "danger-full-access"}` in
 `ludovanta.local.json`: the worktree is a separate checkout, but this lifts the sandbox completely. `codex run` below is for
 when Orca is not available.

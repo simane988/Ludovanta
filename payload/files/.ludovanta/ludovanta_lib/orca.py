@@ -22,7 +22,8 @@ turn, nothing waits any more, and an agent between turns wakes only on input. So
 orchestrator's Orca terminal (ORCA_TERMINAL_HANDLE) and keep 'worker watch' running in the background, outside any
 turn. When an executor finishes, stops or is blocked, the watcher waits until the orchestrator's agent is idle and
 its terminal has been quiet for a minute (typing shows as output: the line must not land in the user's draft), and
-types one line into its terminal; after 10 minutes of waiting it types the line anyway; the orchestrator runs 'worker wait' and gets the reports. Each state is announced
+types one line into its terminal; after 10 minutes it tries anyway, but never forces input into a dialog. The
+orchestrator runs 'worker wait' and gets the reports. Each state is announced
 once ('notified' in the executor's state); what 'worker wait' or 'list' already showed is not announced. The watcher
 exits when no executors are left; the next worker command or session start starts it again.
 
@@ -30,7 +31,7 @@ Executors do not commit: Codex's sandbox keeps .git read-only, and a worktree's 
 copy's .git, outside the worktree. 'worker finish' commits their work (all of it in a worktree; in the main working
 copy the files changed since the start, not the ones that were already uncommitted then).
 
-Codex starts with Orca's own launcher, unless 'codex.sandbox' or 'codex.model' is set in ludovanta.json or
+Codex starts with Orca's own launcher, unless 'codex.sandbox', 'codex.model' or 'codex.approval' is set in ludovanta.json or
 ludovanta.local.json: then Ludovanta starts 'codex --sandbox ... --model ...' in an Orca terminal itself.
 
 Orca must be running (the 'orca' CLI talks to the app). The state of each executor lives in
@@ -47,6 +48,7 @@ import time
 from pathlib import Path
 
 from . import plan as plan_mod
+from .assignment import Agents, pick, validate_weights
 from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, LudovantaError, finish, load_config, relpath, slash,
                      spawn_detached)
 
@@ -90,8 +92,10 @@ def orca(exe: str, *args: str, timeout: int = 180) -> dict:
     if not isinstance(reply, dict) or not reply.get("ok"):
         error = (reply or {}).get("error") if isinstance(reply, dict) else None
         message = (error or {}).get("message") if isinstance(error, dict) else None
-        raise LudovantaError(f"orca {' '.join(args[:2])} failed: "
-                             f"{message or (p.stdout + p.stderr).strip()[-500:] or f'exit code {p.returncode}'}")
+        failure = LudovantaError(f"orca {' '.join(args[:2])} failed: "
+                                 f"{message or (p.stdout + p.stderr).strip()[-500:] or f'exit code {p.returncode}'}")
+        failure.orca_code = error.get("code") if isinstance(error, dict) else None
+        raise failure
     return reply.get("result") or {}
 
 
@@ -280,6 +284,21 @@ def _log(root: Path, line: str, key: str = "") -> None:
         pass
 
 
+def _log_repeat(root: Path, line: str, key: str) -> None:
+    """The same reason or failure is logged at most once per five minutes."""
+    path = root / "Logs" / "ludovanta" / "worker-watch-repeats.json"
+    try:
+        times = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        times = {}
+    now = time.time()
+    if key in times and now - times[key] < 300:
+        return
+    _log(root, line)
+    times[key] = now
+    _write_json(path, times)
+
+
 def _orchestrator_terminal(exe: str, info: dict) -> dict | None:
     """The orchestrator's terminal as Orca lists it; handles change when Orca restarts, the pane stays."""
     try:
@@ -326,7 +345,7 @@ def _watch_round(root: Path, exe: str) -> list[str]:
         return []
     term = _orchestrator_terminal(exe, info)
     if not term:
-        _log(root, f"waiting: the orchestrator's terminal {info['terminal']} is not in Orca", key="gone")
+        _log_repeat(root, f"waiting: the orchestrator's terminal {info['terminal']} is not in Orca", "gone")
         return []
     since = _deferred_since(root) or _set_deferred(root, time.time())
     waited = time.time() - since
@@ -340,20 +359,29 @@ def _watch_round(root: Path, exe: str) -> list[str]:
         busy, kind = "", ""
     if busy and waited < MAX_DEFER_SECONDS:
         preview = " ".join(str(term.get("preview") or "").split())[-60:]
-        _log(root, f"waiting {waited / 60:.0f} min to wake the orchestrator: {busy}; its screen ends {preview!r}",
-             key=f"{kind}-{int(waited // 300)}")   # again every 5 minutes
+        _log_repeat(root, f"waiting {waited / 60:.0f} min to wake the orchestrator: {busy}; its screen ends {preview!r}",
+                    kind)   # again every 5 minutes
         return []   # the line would land in the user's draft, or wait behind a long job
+    news = "; ".join(f"{task} {SETTLED_WORDS.get(state, state)}" for task, state in due)
+    try:
+        receipt = orca(exe, "terminal", "send", "--terminal", handle, "--text",
+                       f"Ludovanta watcher: executor {news}. Run ludovanta.py worker wait and handle it by the skill "
+                       f"ludovanta-plan" + (f"; {running} other executor(s) keep working." if running else "."),
+                       "--enter", "--wait-submit", "5", timeout=30)
+    except LudovantaError as e:
+        if getattr(e, "orca_code", None) != "agent_prompt_blocked":
+            raise
+        _log_repeat(root, "waiting to wake the orchestrator: an open dialog blocks input", "dialog")
+        return []
     if busy:
         _log(root, f"waited {waited / 60:.0f} min ({busy}): typing the line anyway")
-    news = "; ".join(f"{task} {SETTLED_WORDS.get(state, state)}" for task, state in due)
-    orca(exe, "terminal", "send", "--terminal", handle, "--text",
-         f"Ludovanta watcher: executor {news}. Run ludovanta.py worker wait and handle it by the skill "
-         f"ludovanta-plan" + (f"; {running} other executor(s) keep working." if running else "."), "--enter",
-         timeout=30)
     for task, state in due:
         _mark(root, task, state)
     _set_deferred(root, None)
-    _log(root, f"woke the orchestrator ({handle}): {news}")
+    if "turn_started" in ((receipt.get("send") or {}).get("prompt") or {}).get("stages", []):
+        _log(root, f"woke the orchestrator ({handle}): {news}")
+    else:
+        _log(root, f"typed but not confirmed as submitted ({handle}): {news}")
     return [task for task, _ in due]
 
 
@@ -405,7 +433,8 @@ def watch(root: Path, rounds: int, poll: float | None, as_json: bool) -> int:
                         reason = why
                         break
             except Exception as e:  # noqa: BLE001 - nobody sees the watcher fail except through its log
-                _log(root, f"round failed: {type(e).__name__}: {e}")
+                message = f"round failed: {type(e).__name__}: {e}"
+                _log_repeat(root, message, message)
             n += 1
             if rounds and n >= rounds:
                 reason = f"{n} round(s) done"
@@ -448,6 +477,11 @@ def _agent_command(root: Path, agent: str) -> str | None:
         parts += ["--sandbox", cfg["sandbox"]]
     if cfg.get("model"):
         parts += ["--model", str(cfg["model"])]
+    if "approval" in cfg:
+        approvals = ("untrusted", "on-failure", "on-request", "never")
+        if cfg["approval"] not in approvals:
+            raise LudovantaError(f"ludovanta.json: codex.approval must be one of {', '.join(approvals)}")
+        parts += ["--ask-for-approval", cfg["approval"]]
     return " ".join(parts) if len(parts) > 1 else None
 
 
@@ -514,8 +548,7 @@ def start(root: Path, task_id: str, agent: str | None, as_json: bool) -> int:
     task = plan.by_id.get(task_id)
     if not task:
         raise LudovantaError(f"task {task_id} not found")
-    agent = (agent or (task["agent"] if task["agent"] in AGENTS else "claude")).lower()
-    if agent not in AGENTS:
+    if agent and agent.lower() not in AGENTS:
         raise LudovantaError(f"--agent must be one of {', '.join(AGENTS)}")
     if (_state_dir(root) / f"{task_id}.json").is_file():
         return finish("WORKER_EXISTS", EXIT_PROBLEMS, [
@@ -551,10 +584,54 @@ def start(root: Path, task_id: str, agent: str | None, as_json: bool) -> int:
         return finish("NOT_STARTABLE", EXIT_PROBLEMS, [f"NOT_STARTABLE: {task_id}"] + [f"  {p}" for p in problems],
                       {"problems": problems}, as_json)
 
+    probes = Agents(root)
+    weights = validate_weights(probes.cfg)
+    weighted = not agent and task["agent"] == "any" and weights is not None
+    notes, shares = [], {}
+    if weighted:
+        candidates = []
+        for name in AGENTS:
+            if weights.get(name, 0) == 0:
+                notes.append(f"{name} skipped: agentWeights weight zero")
+            else:
+                usable, why = probes.usable(name)
+                if usable:
+                    candidates.append(name)
+                else:
+                    notes.append(f"{name} skipped: {why}")
+        if not candidates:
+            notes.append("Use --agent claude or change agentWeights / fix agent availability.")
+            return finish("AGENT_UNAVAILABLE", EXIT_INFRA, ["AGENT_UNAVAILABLE: no agent left by the weights"]
+                          + notes, {"notes": notes}, as_json)
+        if task["editor"]:
+            connected = [a for a in candidates if probes.unity(a)[0]]
+            if connected:
+                notes += [f"{a} left out: no Unity MCP for this project" for a in candidates if a not in connected]
+                candidates = connected
+        agent, shares = pick(plan.tasks, task["size"], weights, candidates)
+        notes.append(f"agentWeights picked {agent}; shares after this task: " + "; ".join(
+            f"{a}: ({s['work']} + {plan_mod.SIZES[task['size']]}) / {s['weight']} = {s['after']}"
+            for a, s in shares.items()))
+    else:
+        agent = (agent or (task["agent"] if task["agent"] in AGENTS else "claude")).lower()
+        usable, why = probes.usable(agent)
+        if not usable:
+            return finish("AGENT_UNAVAILABLE", EXIT_INFRA, [f"AGENT_UNAVAILABLE: {agent}: {why}"],
+                          {"agent": agent, "reason": why}, as_json)
+    if task["editor"] and not probes.unity(agent)[0]:
+        notes.append(f"Warning: {agent} has no Unity MCP for this project; it can work only HEADLESS, "
+                     "with the Unity Editor closed (cannot use the open Editor).")
+
+    command = _agent_command(root, agent)
+
     # The card says in-progress in the commit the worktree starts from: the executor's 'review' then merges cleanly.
     card = plan.card(task_id)
     card.set_field("status", "in-progress")
     card.set_field("agent", agent)
+    if weighted:
+        card.set_field("assigned", "weights")
+    elif task.get("assigned"):
+        card.set_field("assigned", "")
     card.save()
     card_rel = relpath(Path(top), card.path)
     _git_ok(top, "add", "--", card_rel)
@@ -564,8 +641,7 @@ def start(root: Path, task_id: str, agent: str | None, as_json: bool) -> int:
     repo = _repo_selector(exe, top)
     unity = relpath(Path(top), root) if _norm(top) != _norm(root) else ""
     state = {"task": task_id, "title": task["title"], "agent": agent, "lane": lane, "base": branch,
-             "started": time.time(), "unity": unity}
-    command = _agent_command(root, agent)
+             "started": time.time(), "unity": unity, "notes": notes, "shares": shares}
     if lane == "editor":
         state.update({"id": "", "path": slash(top), "branch": branch, "dirtyAtStart": _dirty_paths(top)})
         return _start_in_terminal(root, exe, state, command or agent, as_json)
@@ -595,7 +671,8 @@ def _started_lines(root: Path, state: dict) -> list[str]:
                 "Next: start other ready tasks, then 'worker wait'."]
     watcher = ensure_watcher(root)
     return [f"WORKER_STARTED: {state['task']} -> {state['agent']} {where}",
-            f"card committed as in-progress on {state['base']}."] + tail + ([watcher] if watcher else [])
+            f"card committed as in-progress on {state['base']}."] + state.get("notes", []) + tail \
+        + ([watcher] if watcher else [])
 
 
 def _wait_idle(exe: str, handle: str) -> bool:
@@ -622,10 +699,22 @@ def _start_in_terminal(root: Path, exe: str, state: dict, command: str, as_json:
                   "pane": term.get("paneKey", ""), "command": command})
     _save(root, state)
     if not _wait_idle(exe, term["handle"]):
+        dialog = ""
+        try:
+            screen = orca(exe, "terminal", "read", "--terminal", term["handle"]).get("terminal") or {}
+            tail = screen.get("tail") or []
+            text = ("\n".join(tail) if isinstance(tail, list) else str(tail)).lower()
+            if agent == "codex":
+                if "trust this folder" in text:
+                    dialog = 'Codex asks "Trust this folder?". '
+                elif "sandbox" in text and any(word in text for word in ("setup", "set up", "configure")):
+                    dialog = "Codex asks to set up its sandbox. "
+        except LudovantaError:
+            pass
         return finish("AGENT_NOT_READY", EXIT_INFRA, [
-            f"AGENT_NOT_READY: the {agent} terminal for {task_id} did not get ready in {READY_TIMEOUT_MS // 500} s "
-            "(a login or trust prompt?). Look at it in Orca, then give it the task with "
-            f"'worker send {task_id} \"<prompt>\"', or close it and 'worker finish {task_id}'."], state, as_json)
+            f"AGENT_NOT_READY: the {agent} terminal for {task_id} did not get ready in {READY_TIMEOUT_MS // 500} s. "
+            + dialog + "The user must inspect and answer it in Orca, then run "
+            f"'worker send {task_id}' to give it the task."], state, as_json)
     orca(exe, "terminal", "send", "--terminal", term["handle"], "--text", _prompt(task_id, state["lane"]), "--enter")
     state["started"] = time.time()
     _save(root, state)
@@ -828,13 +917,13 @@ def _agent_terminal(exe: str, state: dict) -> str:
     raise LudovantaError(f"no {state['agent']} terminal found in {state['path']}; open one in Orca")
 
 
-def send(root: Path, task_id: str, text: str, as_json: bool) -> int:
+def send(root: Path, task_id: str, text: str | None, as_json: bool) -> int:
     exe, why = available(root)
     if not exe:
         return finish("ORCA_UNAVAILABLE", EXIT_INFRA, [f"ORCA_UNAVAILABLE: {why}."], {"reason": why}, as_json)
     state = _load(root, task_id)
     handle = _agent_terminal(exe, state)
-    one_line = " ".join(text.split())
+    one_line = " ".join((text if text is not None else _prompt(task_id, state["lane"])).split())
     orca(exe, "terminal", "send", "--terminal", handle, "--text", one_line, "--enter")
     state["started"] = time.time()   # the agent needs a moment to pick it up before 'wait' may call it stopped
     state["notified"] = None         # its next stop is news for the watcher

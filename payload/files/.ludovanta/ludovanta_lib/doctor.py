@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .assignment import AGENTS, Agents, validate_weights
 from .common import (EXIT_INFRA, EXIT_OK, IS_WINDOWS, LudovantaError, editor_open, finish, load_config, read_text,
                      resolve_unity, unity_version)
 
@@ -45,6 +46,7 @@ class Doctor:
         self.root = root
         self.offline = offline
         self.cfg = load_config(root)
+        self.agents = Agents(root)
         self.checks: list[dict] = []
 
     def add(self, level: str, name: str, detail: str, fix: str = "") -> None:
@@ -178,20 +180,39 @@ class Doctor:
     def codex(self) -> None:
         from .codex import find_codex
         exe = find_codex(self.root)
+        usable, detail = self.agents.usable("codex")
         if not exe:
-            self.add("info", "codex", "not installed: tasks for agent 'codex' go to Claude instead "
-                     "(npm install -g @openai/codex, then codex login)")
+            self.add("info", "codex", detail)
             return
         if ".agents/skills" not in getattr(self, "targets", []):
             self.add("warn", "codex", f"{exe}, but it does not see the ludovanta-* skills",
                      "add \".agents/skills\" to \"skillTargets\" in ludovanta.json, then update")
             return
-        code, out = _run(exe, "login", "status", timeout=30)
-        if code != 0:
-            self.add("warn", "codex", f"{exe}, not logged in ({out.splitlines()[-1] if out else 'no answer'})",
-                     "codex login")
+        if not usable:
+            self.add("warn", "codex", detail, "codex login")
             return
-        self.add("ok", "codex", f"{exe}, logged in")
+        self.add("ok", "codex", detail)
+
+    def assignment(self) -> None:
+        try:
+            weights = validate_weights(self.cfg)
+        except LudovantaError as e:
+            weights = None
+            self.add("warn", "agent weights", str(e), "correct agentWeights in ludovanta.json / ludovanta.local.json")
+        else:
+            self.add("info", "agent weights", json.dumps(weights) if weights is not None else
+                     "agentWeights not set: any goes to Claude (not assigned by weights)")
+        eligible = []
+        for agent in AGENTS:
+            usable, why = self.agents.usable(agent)
+            unity, source = self.agents.unity(agent)
+            self.add("info", f"assignment {agent}", f"usable: {'yes' if usable else 'no'} ({why}); "
+                     f"Unity MCP: {'yes' if unity else 'no'}; source: {source}")
+            if weights is not None and usable and weights.get(agent, 0) > 0 and unity:
+                eligible.append(agent)
+        if weights is not None:
+            self.add("info", "editor assignment", "Editor tasks go to " + ", ".join(eligible) if eligible else
+                     "No eligible agent has Unity MCP; Editor executors can work only HEADLESS with the Editor closed")
 
     def orca(self) -> None:
         try:
@@ -232,7 +253,7 @@ class Doctor:
 
 def doctor(root: Path, offline: bool, as_json: bool) -> int:
     d = Doctor(root, offline)
-    for check in (d.python, d.git, d.unity, d.platform, d.skills, d.agents_md, d.claude, d.codex, d.orca,
+    for check in (d.python, d.git, d.unity, d.platform, d.skills, d.agents_md, d.claude, d.codex, d.assignment, d.orca,
                   d.unity_packages, d.plan):
         try:
             check()

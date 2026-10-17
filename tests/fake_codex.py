@@ -14,8 +14,11 @@ def arg(args, *names):
 
 def main():
     args = sys.argv[1:]
-    print("fake codex args: " + " | ".join(args))
     mode = os.environ.get("FAKE_CODEX_MODE", "task")
+    if args[:3] == ["mcp", "list", "--json"]:
+        print(os.environ.get("FAKE_CODEX_MCP", "[]"))
+        return 0
+    print("fake codex args: " + " | ".join(args))
     if args[:2] == ["login", "status"]:
         print("Not logged in" if mode == "fail" else "Logged in using ChatGPT")
         return 1 if mode == "fail" else 0
