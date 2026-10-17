@@ -3,7 +3,8 @@
 Worktrees are real git worktrees, so Ludovanta's git side works as with Orca. Agents live in 'agents': one per
 worktree made with --agent, one per 'terminal create --command'. A test plays an executor by editing its folder and
 setting its agent's 'state' and 'lastAssistantMessage' in the state file (see test_orca.py).
-FAKE_ORCA_MODE=down reports the app as not running; FAKE_ORCA_TUI=never makes 'terminal wait' time out.
+FAKE_ORCA_MODE=down reports the app as not running; 'terminal wait' times out for a working agent, and for
+every agent with FAKE_ORCA_TUI=never.
 """
 import json
 import os
@@ -98,13 +99,15 @@ def main():
         state["agents"].append(agent)
         result = {"terminal": {"handle": agent["handle"], "paneKey": agent["paneKey"], "worktreeId": f"repo1::{path}"}}
     elif cmd == "terminal wait":
-        if os.environ.get("FAKE_ORCA_TUI") == "never":
+        agent = next((a for a in state["agents"] if a["handle"] == arg(args, "--terminal")), {})
+        if os.environ.get("FAKE_ORCA_TUI") == "never" or agent.get("state") == "working":
             error = "timeout"
         else:
             result = {"wait": {"satisfied": True}}
     elif cmd == "terminal list":
         path = selector_path(state, arg(args, "--worktree"))
-        result = {"terminals": [{"handle": a["handle"], "agentIdentity": a["agentType"], "paneKey": a["paneKey"]}
+        result = {"terminals": [{"handle": a["handle"], "agentIdentity": a["agentType"], "paneKey": a["paneKey"],
+                                 "lastOutputAt": a.get("lastOutputAt")}
                                 for a in state["agents"] if norm(a["path"]) == norm(path)]}
     elif cmd == "terminal send":
         a = next(a for a in state["agents"] if a["handle"] == arg(args, "--terminal"))

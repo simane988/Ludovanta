@@ -8,7 +8,8 @@ Standard library only, Python 3.9+. Installed into .claude/settings.json by the 
                     large, ask the agent to write plan/handoff.md and to suggest /clear to the user
 
 Both also start 'worktree clean' in the background (at session start, and after a reply that finished a task, for
-example by merging an executor's branch): worktrees whose work is merged are removed (see worktrees.py).
+example by merging an executor's branch): worktrees whose work is merged are removed (see worktrees.py). Session start
+also restarts the executors' watcher if executors are left and it is not running (see orca.py).
 
 A hook must never break the session: every failure is swallowed and the exit code is always 0.
 """
@@ -120,6 +121,15 @@ def _clean_worktrees(root: Path) -> None:
         print(f"ludovanta hook: worktree cleanup not started: {e}", file=sys.stderr)
 
 
+def _keep_watching(root: Path) -> None:
+    """Executors may still work after a restart: their watcher wakes the orchestrator (see orca.py)."""
+    try:
+        from . import orca
+        orca.ensure_watcher(root)
+    except Exception as e:  # noqa: BLE001 - the watcher is a side job
+        print(f"ludovanta hook: worker watcher not started: {e}", file=sys.stderr)
+
+
 def run(root: Path, event: str) -> int:
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
@@ -133,6 +143,7 @@ def run(root: Path, event: str) -> int:
                 if lines:
                     print("\n".join(lines))
                 _clean_worktrees(root)
+                _keep_watching(root)
         elif event == "stop" and not payload.get("stop_hook_active"):
             new_milestones, new_tasks = finished_since_last_stop(root, payload)
             if new_milestones or new_tasks:

@@ -17,6 +17,15 @@ Two lanes, chosen by the card's 'editor' field:
     worker send T-001 "text"                     type an answer or a correction into the executor's agent
     worker finish T-001                          worktree: merge and remove it; editor: check the commit, close the agent
 
+The watcher. 'worker wait' lives inside one turn of the orchestrator: when it returns and the orchestrator ends its
+turn, nothing waits any more, and an agent between turns wakes only on input. So the worker commands remember the
+orchestrator's Orca terminal (ORCA_TERMINAL_HANDLE) and keep 'worker watch' running in the background, outside any
+turn. When an executor finishes, stops or is blocked, the watcher waits until the orchestrator's agent is idle and
+its terminal has been quiet for a minute (typing shows as output: the line must not land in the user's draft), and
+types one line into its terminal; after 10 minutes of waiting it types the line anyway; the orchestrator runs 'worker wait' and gets the reports. Each state is announced
+once ('notified' in the executor's state); what 'worker wait' or 'list' already showed is not announced. The watcher
+exits when no executors are left; the next worker command or session start starts it again.
+
 Executors do not commit: Codex's sandbox keeps .git read-only, and a worktree's git data lives in the main working
 copy's .git, outside the worktree. 'worker finish' commits their work (all of it in a worktree; in the main working
 copy the files changed since the start, not the ones that were already uncommitted then).
@@ -38,13 +47,22 @@ import time
 from pathlib import Path
 
 from . import plan as plan_mod
-from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, LudovantaError, finish, load_config, relpath, slash)
+from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, LudovantaError, finish, load_config, relpath, slash,
+                     spawn_detached)
 
 AGENTS = ("claude", "codex")
 FINISHED = ("review", "done")
 START_GRACE_SECONDS = 90      # an agent that has not picked up its prompt yet also looks idle
 REPORT_LINES = 40
 READY_TIMEOUT_MS = 90_000     # a fresh agent TUI must be idle before it can take the prompt
+WATCH_POLL_SECONDS = 15
+WATCH_STALE_SECONDS = 300     # a watcher touches its lock every round; an older lock is a dead watcher
+WATCH_ORCA_DOWN_SECONDS = 600 # Orca closed this long: the watcher exits, the next worker command starts it again
+IDLE_CHECK_MS = 3000          # a busy orchestrator is not interrupted: the watcher tries again next round
+QUIET_SECONDS = 60            # output this recent in the orchestrator's terminal: the user may be typing there
+MAX_DEFER_SECONDS = 600       # a terminal that looks busy or typed-in this long gets the line anyway
+QUESTION_LINES = 8
+WATCH_LOG_BYTES = 256 * 1024
 
 
 # --- The orca CLI -------------------------------------------------------------------------------
@@ -131,10 +149,22 @@ def _load(root: Path, task_id: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _write_json(path: Path, data: dict) -> None:
+    """Whole file or nothing: the watcher reads these files while the worker commands write them."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    for _ in range(50):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05)   # Windows: a reader has the file open for a moment
+    os.replace(tmp, path)
+
+
 def _save(root: Path, state: dict) -> None:
-    folder = _state_dir(root)
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{state['task']}.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json(_state_dir(root) / f"{state['task']}.json", state)
 
 
 def _all(root: Path) -> list[dict]:
@@ -147,6 +177,246 @@ def forget(root: Path, worktree_path) -> None:
     for state in _all(root):
         if _norm(state["path"]) == _norm(worktree_path):
             (_state_dir(root) / f"{state['task']}.json").unlink(missing_ok=True)
+
+
+def _mark(root: Path, task_id: str, notified: str | None) -> None:
+    """Records which state of the executor the orchestrator has seen (re-read: the watcher and the commands both
+    write the file)."""
+    try:
+        state = _load(root, task_id)
+    except LudovantaError:
+        return   # finished meanwhile
+    if state.get("notified") != notified:
+        state["notified"] = notified
+        _save(root, state)
+
+
+# --- The watcher ---------------------------------------------------------------------------------------
+
+def _orchestrator_file(root: Path) -> Path:
+    return _state_dir(root) / "orchestrator.json"
+
+
+def _load_orchestrator(root: Path) -> dict | None:
+    try:
+        return json.loads(_orchestrator_file(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _remember_orchestrator(root: Path) -> dict | None:
+    """The Orca terminal this worker command runs in is the orchestrator's (an executor's own terminal is not):
+    the watcher types there. Returns the orchestrator on record."""
+    handle = os.environ.get("ORCA_TERMINAL_HANDLE")
+    pane = os.environ.get("ORCA_PANE_KEY", "")
+    states = _all(root)
+    if not handle or any(s.get("terminal") == handle or (pane and s.get("pane") == pane) for s in states):
+        return _load_orchestrator(root)
+    worktree = os.environ.get("ORCA_WORKTREE_ID")
+    selector = f"id:{worktree}" if worktree else f"path:{slash(_git_ok(root, 'rev-parse', '--show-toplevel'))}"
+    info = {"terminal": handle, "pane": pane, "worktree": selector}
+    if info != _load_orchestrator(root):
+        _write_json(_orchestrator_file(root), info)
+    return info
+
+
+def _watch_lock(root: Path) -> Path:
+    return root / "Logs" / "ludovanta" / "worker-watch.lock"
+
+
+def ensure_watcher(root: Path) -> str:
+    """Starts 'worker watch' in the background unless one runs. Returns one line for the orchestrator."""
+    if not _load_orchestrator(root):
+        return ("This is not an Orca terminal, so nothing can wake you when an executor finishes: keep running "
+                "'worker wait' while executors work.")
+    if not _all(root) or os.environ.get("LUDOVANTA_NO_WATCHER"):   # the tests run the watcher in the foreground
+        return ""
+    lock = _watch_lock(root)
+    try:
+        running = lock.is_file() and time.time() - lock.stat().st_mtime < WATCH_STALE_SECONDS
+    except OSError:
+        running = False
+    if not running:
+        spawn_detached(root, "worker", "watch")
+    return ("The watcher types into this terminal when an executor finishes or stops: you may end your turn, it "
+            "wakes you.")
+
+
+def _take_lock(lock: Path, token: str) -> bool:
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if lock.is_file() and time.time() - lock.stat().st_mtime > WATCH_STALE_SECONDS:
+            lock.unlink()
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(token)
+    return True
+
+
+def _owns_lock(lock: Path, token: str) -> bool:
+    try:
+        return lock.read_text(encoding="utf-8") == token
+    except OSError:
+        return False
+
+
+_last_log = [""]
+
+
+def _log(root: Path, line: str, key: str = "") -> None:
+    """key: a line that would repeat every round is written only when its key changes."""
+    if key and _last_log[0] == key:
+        return
+    _last_log[0] = key
+    log = root / "Logs" / "ludovanta" / "worker-watch.log"
+    try:
+        if log.is_file() and log.stat().st_size > WATCH_LOG_BYTES:
+            log.unlink()
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+    except OSError:
+        pass
+
+
+def _orchestrator_terminal(exe: str, info: dict) -> dict | None:
+    """The orchestrator's terminal as Orca lists it; handles change when Orca restarts, the pane stays."""
+    try:
+        terminals = orca(exe, "terminal", "list", "--worktree", info["worktree"], timeout=30).get("terminals") or []
+    except LudovantaError:
+        return {"handle": info["terminal"]}
+    for t in terminals:
+        if t.get("handle") == info["terminal"]:
+            return t
+    for t in terminals:
+        if info.get("pane") and (t.get("paneKey") or f"{t.get('tabId')}:{t.get('leafId')}") == info["pane"]:
+            return t
+    return None   # the orchestrator's terminal is closed: nobody to wake
+
+
+def _idle(exe: str, handle: str) -> bool:
+    try:
+        result = orca(exe, "terminal", "wait", "--terminal", handle, "--for", "tui-idle",
+                      "--timeout-ms", str(IDLE_CHECK_MS), timeout=30)
+    except LudovantaError:
+        return False   # Orca reports a busy TUI as a timeout
+    return bool((result.get("wait") or result).get("satisfied", True))
+
+
+SETTLED_WORDS = {"finished": "finished (card in review)", "stopped": "stopped (a question or a failure)",
+                 "blocked": "is blocked", "gone": "is gone (its worktree was removed)"}
+
+
+def _watch_round(root: Path, exe: str) -> list[str]:
+    """One look at every executor; returns the tasks announced to the orchestrator."""
+    rows = _rows(exe)
+    due, running = [], 0
+    for s in _all(root):
+        state = verdict(root, s, rows.get(_norm(s["path"])))["state"]
+        if state == "running":
+            running += 1
+            if s.get("notified"):
+                _mark(root, s["task"], None)   # working again (an answer was sent): its next stop is news
+        elif s.get("notified") != state:
+            due.append((s["task"], state))
+    info = _load_orchestrator(root)
+    if not due or not info:
+        _set_deferred(root, None)
+        return []
+    term = _orchestrator_terminal(exe, info)
+    if not term:
+        _log(root, f"waiting: the orchestrator's terminal {info['terminal']} is not in Orca", key="gone")
+        return []
+    since = _deferred_since(root) or _set_deferred(root, time.time())
+    waited = time.time() - since
+    handle = term["handle"]
+    quiet = time.time() - float(term.get("lastOutputAt") or 0) / 1000
+    if quiet < QUIET_SECONDS:
+        busy, kind = f"output in its terminal {quiet:.0f} s ago (the user typing?)", "output"
+    elif not _idle(exe, handle):
+        busy, kind = "its agent is not idle", "busy"
+    else:
+        busy, kind = "", ""
+    if busy and waited < MAX_DEFER_SECONDS:
+        preview = " ".join(str(term.get("preview") or "").split())[-60:]
+        _log(root, f"waiting {waited / 60:.0f} min to wake the orchestrator: {busy}; its screen ends {preview!r}",
+             key=f"{kind}-{int(waited // 300)}")   # again every 5 minutes
+        return []   # the line would land in the user's draft, or wait behind a long job
+    if busy:
+        _log(root, f"waited {waited / 60:.0f} min ({busy}): typing the line anyway")
+    news = "; ".join(f"{task} {SETTLED_WORDS.get(state, state)}" for task, state in due)
+    orca(exe, "terminal", "send", "--terminal", handle, "--text",
+         f"Ludovanta watcher: executor {news}. Run ludovanta.py worker wait and handle it by the skill "
+         f"ludovanta-plan" + (f"; {running} other executor(s) keep working." if running else "."), "--enter",
+         timeout=30)
+    for task, state in due:
+        _mark(root, task, state)
+    _set_deferred(root, None)
+    _log(root, f"woke the orchestrator ({handle}): {news}")
+    return [task for task, _ in due]
+
+
+def _deferred_file(root: Path) -> Path:
+    return root / "Logs" / "ludovanta" / "worker-watch-deferred.txt"
+
+
+def _deferred_since(root: Path) -> float | None:
+    """Since when there is news the orchestrator has not got."""
+    try:
+        return float(_deferred_file(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _set_deferred(root: Path, since: float | None) -> float | None:
+    path = _deferred_file(root)
+    if since is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(str(since), encoding="utf-8")
+    return since
+
+
+def watch(root: Path, rounds: int, poll: float | None, as_json: bool) -> int:
+    """The background watcher (started by the worker commands); 'rounds' and 'poll' are for tests."""
+    poll = WATCH_POLL_SECONDS if poll is None else poll
+    lock, token = _watch_lock(root), f"{os.getpid()}-{time.time()}"
+    if not _take_lock(lock, token):
+        return finish("WATCH_BUSY", EXIT_OK, ["WATCH_BUSY: another watcher runs for this project."], {}, as_json)
+    announced, down_since, n, reason = [], None, 0, "no executors left"
+    _log(root, "started")
+    try:
+        while True:
+            try:
+                if not _all(root):
+                    break
+                if not _owns_lock(lock, token):
+                    reason = "another watcher took over"
+                    break
+                os.utime(lock)
+                exe, why = available(root)
+                if exe:
+                    down_since = None
+                    announced += _watch_round(root, exe)
+                else:
+                    down_since = down_since or time.monotonic()
+                    if time.monotonic() - down_since > WATCH_ORCA_DOWN_SECONDS:
+                        reason = why
+                        break
+            except Exception as e:  # noqa: BLE001 - nobody sees the watcher fail except through its log
+                _log(root, f"round failed: {type(e).__name__}: {e}")
+            n += 1
+            if rounds and n >= rounds:
+                reason = f"{n} round(s) done"
+                break
+            time.sleep(poll)
+    finally:
+        if _owns_lock(lock, token):
+            lock.unlink(missing_ok=True)
+        _log(root, f"exited: {reason}")
+    return finish("WATCH_DONE", EXIT_OK, [f"WATCH_DONE: announced {', '.join(announced) or 'nothing'}."],
+                  {"announced": announced}, as_json)
 
 
 # --- worker start --------------------------------------------------------------------------------------
@@ -290,6 +560,7 @@ def start(root: Path, task_id: str, agent: str | None, as_json: bool) -> int:
     _git_ok(top, "add", "--", card_rel)
     _git_ok(top, "commit", "--quiet", "-m", f"{task_id}: started by {agent} in Orca", "--", card_rel)
 
+    _remember_orchestrator(root)
     repo = _repo_selector(exe, top)
     unity = relpath(Path(top), root) if _norm(top) != _norm(root) else ""
     state = {"task": task_id, "title": task["title"], "agent": agent, "lane": lane, "base": branch,
@@ -310,10 +581,10 @@ def start(root: Path, task_id: str, agent: str | None, as_json: bool) -> int:
     if command:
         return _start_in_terminal(root, exe, state, command, as_json)
     _save(root, state)
-    return finish("WORKER_STARTED", EXIT_OK, _started_lines(state), state, as_json)
+    return finish("WORKER_STARTED", EXIT_OK, _started_lines(root, state), state, as_json)
 
 
-def _started_lines(state: dict) -> list[str]:
+def _started_lines(root: Path, state: dict) -> list[str]:
     if state["lane"] == "editor":
         where = (f"in the main working copy ({state['path']}), a new Orca terminal. It needs the Unity Editor, so "
                  "other tasks that need it wait until 'worker finish'.")
@@ -322,8 +593,9 @@ def _started_lines(state: dict) -> list[str]:
         where = f"in Orca worktree {state['path']} (branch {state['branch']}, HEADLESS)."
         tail = ["The first compile in a fresh worktree imports all assets and can take many minutes.",
                 "Next: start other ready tasks, then 'worker wait'."]
+    watcher = ensure_watcher(root)
     return [f"WORKER_STARTED: {state['task']} -> {state['agent']} {where}",
-            f"card committed as in-progress on {state['base']}."] + tail
+            f"card committed as in-progress on {state['base']}."] + tail + ([watcher] if watcher else [])
 
 
 def _wait_idle(exe: str, handle: str) -> bool:
@@ -357,7 +629,7 @@ def _start_in_terminal(root: Path, exe: str, state: dict, command: str, as_json:
     orca(exe, "terminal", "send", "--terminal", term["handle"], "--text", _prompt(task_id, state["lane"]), "--enter")
     state["started"] = time.time()
     _save(root, state)
-    return finish("WORKER_STARTED", EXIT_OK, _started_lines(state), state, as_json)
+    return finish("WORKER_STARTED", EXIT_OK, _started_lines(root, state), state, as_json)
 
 
 def _editor_worker(root: Path) -> dict | None:
@@ -451,6 +723,7 @@ def wait(root: Path, tasks: list[str], timeout: int, poll: float, as_json: bool)
     states = [_load(root, t) for t in tasks] if tasks else _all(root)
     if not states:
         return finish("NO_WORKERS", EXIT_OK, ["NO_WORKERS: no executors in Orca ('worker start T-xxx')."], {}, as_json)
+    _remember_orchestrator(root)
     deadline = time.monotonic() + max(0, timeout)
     while True:
         rows = _rows(exe)
@@ -460,6 +733,7 @@ def wait(root: Path, tasks: list[str], timeout: int, poll: float, as_json: bool)
             break
         time.sleep(poll)
     for s, v, _ in settled:
+        _mark(root, s["task"], v["state"])   # shown here: the watcher does not announce it again
         if v["state"] == "finished" and s.get("lane") != "editor":   # the main working copy's column stays
             try:
                 orca(exe, "worktree", "set", "--worktree", f"id:{s['id']}", "--workspace-status", "in-review",
@@ -469,11 +743,62 @@ def wait(root: Path, tasks: list[str], timeout: int, poll: float, as_json: bool)
     lines = []
     for s, v, row in results:
         lines += _describe(s, v, row)
+    shown = {s["task"] for s, _, _ in results}
+    everyone = results + [(s, verdict(root, s, rows.get(_norm(s["path"]))), rows.get(_norm(s["path"])))
+                          for s in _all(root) if s["task"] not in shown]
+    waiting = _waiting_for_user(root, everyone)
+    lines += _waiting_lines(waiting)
     status = "WORKERS_SETTLED" if settled else "WORKERS_RUNNING"
     lines.insert(0, f"{status}: {len(settled)} of {len(results)} executor(s) need you"
                  + ("" if settled or timeout <= 0 else f"; nothing settled in {timeout} s, run 'worker wait' again"))
-    data = {"workers": [{**s, **v, "report": _report(s, row)} for s, v, row in results]}
+    if len(settled) < len(results):
+        watcher = ensure_watcher(root)
+        if watcher:
+            lines.append(watcher)
+    data = {"workers": [{**s, **v, "report": _report(s, row)} for s, v, row in results], "waitingForUser": waiting}
     return finish(status, EXIT_OK, lines, data, as_json)
+
+
+def _question(report: list[str]) -> list[str]:
+    """The paragraphs of the executor's final message that ask something; without a '?', its last paragraph."""
+    paragraphs, current = [], []
+    for line in report + [""]:
+        if line.strip():
+            current.append(line)
+        elif current:
+            paragraphs.append(current)
+            current = []
+    asking = [line for p in paragraphs if any("?" in line for line in p) for line in p]
+    if asking:
+        return asking[:QUESTION_LINES]
+    return paragraphs[-1][-QUESTION_LINES:] if paragraphs else []
+
+
+def _waiting_for_user(root: Path, results: list) -> list[dict]:
+    """Everything the user has to answer or accept, including what was shown before and is still open: executors
+    stopped with a question, and tasks in review that no executor holds any more."""
+    items = [{"task": s["task"], "title": s.get("title", ""), "kind": "question", "text": _question(_report(s, row))}
+             for s, v, row in results if v["state"] in ("stopped", "blocked")]
+    held = {s["task"] for s, _, _ in results}
+    items += [{"task": t["id"], "title": t["title"], "kind": "review", "text": []}
+              for t in plan_mod.Plan(root).tasks if t["status"] == "review" and t["id"] not in held]
+    return items
+
+
+def _waiting_lines(items: list[dict]) -> list[str]:
+    if not items:
+        return []
+    lines = ["WAITING FOR THE USER: end your reply to the user with all of these, numbered as here, each with its "
+             "task, also the ones you asked before (an answered or accepted one drops out by itself). Ask what an "
+             "executor asks only if you cannot answer it yourself; then pass each answer to its own task with "
+             "'worker send'."]
+    for n, item in enumerate(items, 1):
+        if item["kind"] == "question":
+            lines.append(f"  {n}. {item['task']} {item['title']}: the executor asks or reports a problem:")
+            lines += [f"       {line}" for line in item["text"]] or ["       (see its report above)"]
+        else:
+            lines.append(f"  {n}. {item['task']} {item['title']}: done, waits for the user to check and accept it.")
+    return lines
 
 
 # --- worker send --------------------------------------------------------------------------------------
@@ -507,8 +832,12 @@ def send(root: Path, task_id: str, text: str, as_json: bool) -> int:
     one_line = " ".join(text.split())
     orca(exe, "terminal", "send", "--terminal", handle, "--text", one_line, "--enter")
     state["started"] = time.time()   # the agent needs a moment to pick it up before 'wait' may call it stopped
+    state["notified"] = None         # its next stop is news for the watcher
     _save(root, state)
-    return finish("WORKER_SENT", EXIT_OK, [f"WORKER_SENT: {task_id} got your message. Next: 'worker wait {task_id}'."],
+    _remember_orchestrator(root)
+    watcher = ensure_watcher(root)
+    return finish("WORKER_SENT", EXIT_OK, [f"WORKER_SENT: {task_id} got your message. "
+                                           + (watcher or f"Next: 'worker wait {task_id}'.")],
                   {"task": task_id, "terminal": handle}, as_json)
 
 

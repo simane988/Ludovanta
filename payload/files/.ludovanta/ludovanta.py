@@ -155,6 +155,10 @@ def build_parser() -> argparse.ArgumentParser:
     q = wk.add_parser("finish", help="merge the executor's branch into the current branch, remove its worktree")
     q.add_argument("task")
     q.add_argument("--json", action="store_true")
+    q = wk.add_parser("watch", help="started in the background by the worker commands: wakes the orchestrator")
+    q.add_argument("--rounds", type=int, default=0, help=argparse.SUPPRESS)
+    q.add_argument("--poll", type=float, help=argparse.SUPPRESS)
+    q.add_argument("--json", action="store_true")
 
     p = sub.add_parser("worktree", help="git worktrees of parallel executors")
     wt = p.add_subparsers(dest="worktree_command", required=True)
@@ -276,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
                 return orca.wait(root, tasks, timeout, args.poll if wc == "wait" else 0, args.json)
             if wc == "send":
                 return orca.send(root, args.task, args.text, args.json)
+            if wc == "watch":
+                return orca.watch(root, args.rounds, args.poll, args.json)
             return orca.finish_worker(root, args.task, args.json)
         if args.command == "worktree":
             from ludovanta_lib import worktrees

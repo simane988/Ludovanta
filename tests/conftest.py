@@ -22,8 +22,13 @@ def isolated_machine(monkeypatch, tmp_path):
       daemon per test repo and worktree. It lives as long as the folder, and pytest keeps the folders of the last
       three runs: over a thousand daemons, enough to exhaust the machine's memory.
       GIT_CONFIG_* reaches every git started by the tests, Ludovanta and the fakes.
+    - No background watcher: a worker command would start 'worker watch' for the Orca terminal pytest runs in.
+      The tests run the watcher in the foreground instead.
     """
     monkeypatch.setenv("ORCA_PATH", str(tmp_path / "no-orca"))
+    for name in ("ORCA_TERMINAL_HANDLE", "ORCA_PANE_KEY", "ORCA_WORKTREE_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LUDOVANTA_NO_WATCHER", "1")
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")

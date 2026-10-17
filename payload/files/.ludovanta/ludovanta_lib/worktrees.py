@@ -19,11 +19,10 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
-from .common import EXIT_OK, IS_WINDOWS, LudovantaError, editor_open, finish, load_config, slash
+from .common import EXIT_OK, IS_WINDOWS, LudovantaError, editor_open, finish, load_config, slash, spawn_detached
 
 LOG_NAME = "worktree-clean.log"
 LOCK_NAME = "worktree-clean.lock"
@@ -250,17 +249,8 @@ def auto_clean(root: Path) -> bool:
     """Starts 'worktree clean' in the background (removing a Unity Library takes a while); True if started."""
     if (load_config(root).get("worktrees") or {}).get("autoClean") is False or not _has_linked_worktrees(root):
         return False
-    log_dir = root / "Logs" / "ludovanta"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    cli = Path(__file__).resolve().parent.parent / "ludovanta.py"
-    args = [sys.executable, "-B", str(cli), "--project", str(root), "worktree", "clean", "--background"]
-    if IS_WINDOWS:
-        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW: outlives the hook, no console window.
-        kwargs = {"creationflags": 0x00000008 | 0x00000200 | 0x08000000}
-    else:
-        kwargs = {"start_new_session": True}
-    subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     close_fds=True, cwd=str(root), **kwargs)
+    (root / "Logs" / "ludovanta").mkdir(parents=True, exist_ok=True)
+    spawn_detached(root, "worktree", "clean", "--background")
     return True
 
 

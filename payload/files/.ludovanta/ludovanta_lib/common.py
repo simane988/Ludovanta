@@ -227,6 +227,18 @@ def run_unity(exe: Path, args: list[str], timeout_sec: int) -> dict:
     return {"exit_code": code, "timed_out": timed_out, "seconds": round(time.monotonic() - start, 1)}
 
 
+def spawn_detached(root: Path, *args: str) -> None:
+    """Starts 'ludovanta.py <args>' for this project in the background: it outlives the caller (a hook, a command)."""
+    cli = Path(__file__).resolve().parent.parent / "ludovanta.py"
+    if IS_WINDOWS:
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW: outlives the caller, no console window.
+        kwargs = {"creationflags": 0x00000008 | 0x00000200 | 0x08000000}
+    else:
+        kwargs = {"start_new_session": True}
+    subprocess.Popen([sys.executable, "-B", str(cli), "--project", str(root), *args], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, cwd=str(root), **kwargs)
+
+
 # --- Output ------------------------------------------------------------------------
 
 def finish(status: str, code: int, lines: list[str], data: dict | None = None, as_json: bool = False) -> int:

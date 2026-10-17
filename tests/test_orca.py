@@ -287,3 +287,143 @@ def test_codex_starts_with_the_sandbox_from_ludovanta_settings(game, fake_orca_e
     assert agent["command"] == "codex --sandbox danger-full-access --model gpt-x"
     assert os.path.normcase(agent["path"]) == os.path.normcase(out["path"])
     assert "plan brief T-001" in agent["sent"][0] and "HEADLESS" in agent["sent"][0]
+
+
+@pytest.fixture
+def in_orca(orchestrator, monkeypatch):
+    """The worker commands run in the orchestrator's Orca terminal (term_me)."""
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_me")
+    monkeypatch.setenv("ORCA_PANE_KEY", "me:me")
+    monkeypatch.setenv("ORCA_WORKTREE_ID", "repo1::" + str(orchestrator).replace("\\", "/"))
+    return orchestrator
+
+
+def watch(game):
+    code, out = cli(game, "worker", "watch", "--rounds", "1", "--poll", "0")
+    assert code == 0 and out["status"] == "WATCH_DONE", out
+    return out["announced"]
+
+
+def me(fake_orca_env):
+    return next(a for a in agents(fake_orca_env) if a["handle"] == "term_me")
+
+
+def stop_grace(game, tid):
+    state = worker_state(game, tid)
+    state["started"] = 0
+    write(game / f"Logs/ludovanta/workers/{tid}.json", json.dumps(state))
+
+
+def test_watcher_wakes_the_orchestrator_once_per_executor(in_orca, fake_orca_env):
+    """'worker wait' ends with the orchestrator's turn; the executors that settle later must still reach it."""
+    game = in_orca
+    _, started = cli(game, "worker", "start", "T-001")
+    cli(game, "worker", "start", "T-003")
+    assert json.loads(read(game / "Logs/ludovanta/workers/orchestrator.json"))["terminal"] == "term_me"
+    execute(game.parent / "orca/workspaces" / os.path.basename(started["path"]), commit=False)
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="done", lastAssistantMessage="Done")
+
+    assert watch(game) == [] and not me(fake_orca_env)["sent"], "a working orchestrator is not interrupted"
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    assert watch(game) == ["T-001"]
+    assert "T-001 finished" in me(fake_orca_env)["sent"][0] and "worker wait" in me(fake_orca_env)["sent"][0]
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    assert watch(game) == [], "announced once"
+
+    stop_grace(game, "T-003")
+    t003 = worker_state(game, "T-003")["terminal"]
+    set_agent(fake_orca_env, handle=t003, state="waiting", lastAssistantMessage="Which scene?")
+    assert watch(game) == ["T-003"] and "T-003 stopped" in me(fake_orca_env)["sent"][1]
+    assert "T-001" not in me(fake_orca_env)["sent"][1]
+
+
+def test_watcher_skips_what_the_orchestrator_saw_and_announces_the_next_stop(in_orca, fake_orca_env):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting", lastAssistantMessage="Which car?")
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    _, out = cli(game, "worker", "list")
+    assert out["workers"][0]["state"] == "stopped"
+    assert watch(game) == [], "'worker list' already showed it"
+
+    cli(game, "worker", "send", "T-001", "The yellow one")
+    assert watch(game) == [], "it works on the answer"
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting", lastAssistantMessage="And now?")
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    assert watch(game) == ["T-001"]
+
+
+def test_watcher_finds_the_orchestrator_after_orca_restarts(in_orca, fake_orca_env, monkeypatch):
+    game = in_orca
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_before_restart")   # same pane, new handle
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting", lastAssistantMessage="?")
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    assert watch(game) == ["T-001"] and me(fake_orca_env)["sent"]
+
+
+def test_watcher_runs_once_per_project_and_exits_without_executors(in_orca, fake_orca_env):
+    game = in_orca
+    code, out = cli(game, "worker", "watch", "--poll", "0")
+    assert code == 0 and out["status"] == "WATCH_DONE", "no executors: nothing to watch"
+    cli(game, "worker", "start", "T-001")
+    write(game / "Logs/ludovanta/worker-watch.lock", "another watcher")
+    code, out = cli(game, "worker", "watch", "--rounds", "1", "--poll", "0")
+    assert out["status"] == "WATCH_BUSY"
+    assert read(game / "Logs/ludovanta/worker-watch.lock") == "another watcher"
+
+
+def test_watcher_does_not_type_into_a_terminal_where_the_user_may_be_typing(in_orca, fake_orca_env):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting", lastAssistantMessage="Which car?")
+    set_agent(fake_orca_env, handle="term_me", state="idle", lastOutputAt=time.time() * 1000 - 5000)
+    assert watch(game) == [] and not me(fake_orca_env)["sent"], "the line would land in the user's draft"
+    set_agent(fake_orca_env, handle="term_me", lastOutputAt=time.time() * 1000 - 120_000)
+    assert watch(game) == ["T-001"]
+
+
+def test_wait_lists_everything_waiting_for_the_user(in_orca, fake_orca_env):
+    """The first executor's question is still open when the second one asks: the user must see both, by task."""
+    game = in_orca
+    card(game, "T-004", status="review")   # finished earlier, waits for the user's check
+    git(game, "commit", "--quiet", "-am", "T-004 in review")
+    cli(game, "worker", "start", "T-001")
+    cli(game, "worker", "start", "T-003")
+    for tid in ("T-001", "T-003"):
+        stop_grace(game, tid)
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting",
+              lastAssistantMessage="I made the meter.\n\nShould the fare include tips?")
+    _, out = cli(game, "worker", "wait", "T-001", "--timeout", "0")
+    assert [(w["task"], w["kind"]) for w in out["waitingForUser"]] == [("T-001", "question"), ("T-004", "review")]
+    assert out["waitingForUser"][0]["text"] == ["Should the fare include tips?"]
+
+    set_agent(fake_orca_env, handle=worker_state(game, "T-003")["terminal"], state="waiting",
+              lastAssistantMessage="Which scene should the taxi start in?\n\n- What changed: nothing yet")
+    code, text = run_py(CLI, "--project", str(game), "worker", "wait", "--timeout", "0")
+    block = text[text.index("WAITING FOR THE USER"):]
+    assert "1. T-001 Fare meter T-001" in block and "Should the fare include tips?" in block
+    assert "2. T-003 Fare meter T-003" in block and "Which scene should the taxi start in?" in block
+    assert "What changed" not in block, "the question, not the rest of the report"
+    assert "3. T-004 Fare meter T-004" in block and "accept" in block
+
+    cli(game, "worker", "send", "T-001", "No tips")
+    _, out = cli(game, "worker", "list")
+    assert [w["task"] for w in out["waitingForUser"]] == ["T-003", "T-004"], "an answered question drops out"
+
+
+def test_watcher_types_anyway_after_waiting_too_long(in_orca, fake_orca_env):
+    """An orchestrator terminal that never looks free must not swallow the news."""
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting", lastAssistantMessage="Which car?")
+    assert watch(game) == [], "term_me is working"
+    assert "its agent is not idle" in read(game / "Logs/ludovanta/worker-watch.log")
+    write(game / "Logs/ludovanta/worker-watch-deferred.txt", str(time.time() - 700))
+    assert watch(game) == ["T-001"] and me(fake_orca_env)["sent"]
+    assert not (game / "Logs/ludovanta/worker-watch-deferred.txt").exists()

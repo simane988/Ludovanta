@@ -204,6 +204,24 @@ Orchestrator, for each task (`plan next`, or the one the user named):
    - **stopped** or **blocked** (the agent is idle, the card is not in review): a question, a failure or
      a STOP. Answer what you can, ask the user the rest, and pass the answer with
      `worker send T-xxx "..."`.
+   You do not have to stay in `worker wait` until every executor is done. When you run the orchestrator
+   in an Orca terminal, the worker commands start a watcher in the background. When an executor
+   finishes, stops or is blocked, and you are idle, the watcher types a line into your terminal:
+   "Ludovanta watcher: executor T-xxx finished ... Run ludovanta.py worker wait". Treat that line as
+   your cue rather than as the user's words: run `worker wait` and handle what it shows. So you can
+   handle one executor, report to the user and end your turn while the others work. Each state is
+   announced once, and what `worker wait` or `worker list` already showed is not announced. When the
+   orchestrator is not in an Orca terminal, the command says so: then nothing wakes you, so keep
+   running `worker wait` until no executors are left.
+   Several executors can wait for the user at the same time: the first asked a question, and before
+   the user answered, a second one came back with its own. `worker wait` and `worker list` end with a
+   `WAITING FOR THE USER` block that holds every open item, by task: a question from a stopped executor,
+   and a task in review waiting for the user to accept it. The block includes items you have already
+   asked about. Every reply to the user ends with this list in the user's language, numbered as in the
+   block, each item headed by its task (`1. T-001 Fare meter: ...`), so the user can answer
+   "1: yes, 2: the yellow one". Do not drop an earlier question because a newer one arrived: in the
+   conversation it is above, out of sight. Pass each answer to its own task with `worker send`. An
+   answered question and an accepted task drop out of the block by themselves.
    `worker list` shows every executor without waiting. Worktrees that are merged but still exist
    (made by hand, or a finish that could not remove them) are removed by `worktree clean`; the Claude
    Code hooks run it in the background. It keeps a worktree with unmerged or uncommitted work, an
