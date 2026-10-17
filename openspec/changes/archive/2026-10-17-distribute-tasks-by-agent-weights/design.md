@@ -61,6 +61,20 @@ config overrides per agent when this guess is wrong. Nothing is ever written to 
 **Codex usability checked at start, cached for the command.** `codex login status` costs a process start; it runs
 once per `worker start`, only when the pick involves Codex. Doctor and start share the same check.
 
+**Additions after the first live run.**
+- *`codex.approval` passes Codex's own values through* (`untrusted`, `on-failure`, `on-request`, `never`), checked
+  before anything is committed. No default: unattended executors need `never`, but that is the user's choice per
+  machine, like `codex.sandbox`. Any of the three Codex settings makes Ludovanta start Codex itself.
+- *First-run dialogs are recognised from the terminal's screen* (Orca's `terminal read`): "Trust this folder?" and the
+  Windows sandbox setup. Ludovanta never answers them: trusting a folder and setting up a sandbox change the user's
+  machine. The orchestrator passes them to the user, then `worker send T-xxx` without text types the task prompt
+  (the same text `worker start` builds), so nobody rebuilds it by hand.
+- *`agent_prompt_blocked` is Orca's answer to input while the agent shows a dialog.* Orca's `--retry-request` is for
+  ambiguous transport failures, not for this, so the watcher simply keeps the news and tries next round. The
+  10-minute limit exists for terminals that only look busy; a dialog is really busy, and forcing input into it is
+  what lost a line in the live run. `--wait-submit` lets the watcher see whether its line was submitted; when it
+  was not, the log says so. The news still counts as announced: typing it twice into a draft would be worse.
+
 ## Risks / Trade-offs
 
 - [Unity MCP detection misses a setup or counts a wrong one (an unusual server name, a config Claude reads that

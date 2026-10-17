@@ -30,6 +30,15 @@ between the two in proportions the user sets in the configuration.
   an ability the other one lacks (today: image generation, Codex); leave the rest `any` for the weights and let
   `plan stats` show whether that needs a correction.
 
+Added after the first live run (Codex executors in Orca), at the user's request:
+- `codex.approval` next to `codex.sandbox` and `codex.model`: Codex executors started by Ludovanta asked for
+  confirmation of every command, with no way to set Codex's approval policy.
+- `AGENT_NOT_READY` names Codex's first-run dialogs (trust the folder, set up the sandbox) and `worker send T-xxx`
+  without text gives the executor its task prompt, so the orchestrator does not rebuild it by hand.
+- The watcher treats Orca's `agent_prompt_blocked` (a dialog open in the orchestrator's terminal) as busy instead of
+  a failure, never forces the line into a dialog, logs a repeated failure once per 5 minutes instead of every round,
+  and checks with Orca that its line was submitted.
+
 ## Capabilities
 
 ### New Capabilities
@@ -38,8 +47,11 @@ between the two in proportions the user sets in the configuration.
   recorded.
 
 ### Modified Capabilities
-- `orchestration/executors`: the "Agent choice" requirement (introduced by `document-worker-orchestration`) now
-  defers `any` cards to agent assignment instead of always choosing Claude.
+- `orchestration/executors`: "Agent choice" defers `any` cards to agent assignment instead of always choosing
+  Claude, adds `codex.approval`, and makes `AGENT_NOT_READY` name Codex's first-run dialogs; "Messages to an executor"
+  lets `worker send T-xxx` without text give the task prompt; new "Codex approval setting checked".
+- `orchestration/watcher`: an open dialog (`agent_prompt_blocked`) is holding back, not a failure, and is not forced
+  by the 10-minute limit; repeated failures are logged once per 5 minutes; new "Delivery of the line checked".
 
 ## Impact
 

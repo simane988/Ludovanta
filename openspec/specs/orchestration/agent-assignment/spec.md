@@ -1,11 +1,10 @@
-# Spec Delta
+# orchestration/agent-assignment Specification
 
 ## Purpose
-
 Decides which agent, Claude Code or Codex, executes a plan task: pinned tasks go to their agent, and general tasks
 are split between the agents usable on this machine in the proportions the user configured.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Pinned agent wins
 A card whose `agent` is `claude` or `codex` SHALL be executed by that agent, never reassigned by the weights, and SHALL
@@ -79,13 +78,17 @@ skip an agent that is not usable and say so. A card pinned to an agent that is n
 - **THEN** `worker start` fails with `AGENT_UNAVAILABLE`, the card stays `todo`, and no terminal is opened
 
 ### Requirement: Editor tasks go to agents with Unity MCP
-For a card with `editor: true` and `agent: any`, the weights SHALL consider only agents that have Unity MCP for this
-project, as long as at least one has it; when none has it, all usable agents SHALL be considered, as before. Cards with
-`editor: false` are not affected.
+For a card with `editor: true` and `agent: any`, the weights SHALL consider only those usable agents with a weight
+above zero that have Unity MCP for this project, as long as at least one of them has it; when none of them has it,
+all of them SHALL be considered, as before. Cards with `editor: false` are not affected.
 
 #### Scenario: Codex without Unity MCP
 - **WHEN** weights are `{"claude": 1, "codex": 1}`, only Claude has Unity MCP, and an `any` card with `editor: true` is started
 - **THEN** Claude gets it as a weight-assigned task, and the output says that Codex was left out for lacking Unity MCP in this project
+
+#### Scenario: Unity MCP only at weight zero
+- **WHEN** weights are `{"claude": 0, "codex": 1}`, only Claude has Unity MCP, Codex is usable, and an `any` card with `editor: true` is started
+- **THEN** Codex gets it, and the output says that it can work only HEADLESS while the Editor is closed
 
 #### Scenario: Both agents have Unity MCP
 - **WHEN** Claude and Codex both have Unity MCP for this project and an `any` card with `editor: true` is started
@@ -94,6 +97,15 @@ project, as long as at least one has it; when none has it, all usable agents SHA
 #### Scenario: No agent has Unity MCP
 - **WHEN** no agent has Unity MCP for this project and an `any` card with `editor: true` is started
 - **THEN** the weights pick among all usable agents, and the output says that the executor can work only HEADLESS while the Editor is closed
+
+### Requirement: No agent left by the weights
+When no usable agent has a weight above zero, `worker start` of an `agent: any` card SHALL fail with
+`AGENT_UNAVAILABLE`, say which agents were left out and why (weight zero, not found, not logged in), suggest
+`--agent` or a weight change, leave the card unchanged and open no terminal. A zero weight SHALL never be overridden.
+
+#### Scenario: Claude at zero, Codex logged out
+- **WHEN** weights are `{"claude": 0, "codex": 1}`, Codex is not logged in, and an `any` card is started
+- **THEN** `worker start` fails with `AGENT_UNAVAILABLE`, names both reasons, suggests `--agent claude`, the card stays `todo`, and no terminal is opened
 
 ### Requirement: Warning for a pinned Editor task without Unity MCP
 When a card with `editor: true` is started for an agent without Unity MCP for this project (pinned or `--agent`), the
