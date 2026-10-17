@@ -21,7 +21,8 @@ from pathlib import Path
 
 def _git(*args: str) -> tuple[int, str]:
     try:
-        p = subprocess.run(["git", *args], capture_output=True, text=True, errors="replace")
+        p = subprocess.run(["git", *args], capture_output=True, text=True, errors="replace",
+                           creationflags=0x08000000 if os.name == "nt" else 0)   # CREATE_NO_WINDOW
     except OSError as e:
         return 127, str(e)
     return p.returncode, (p.stdout + p.stderr).strip()

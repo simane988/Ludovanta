@@ -13,6 +13,8 @@ FIXTURES = TESTS / "fixtures"
 PLATFORM_DIR = REPO / "payload" / "files" / ".ludovanta"
 INSTALL = REPO / "install.py"
 IS_WINDOWS = os.name == "nt"
+# CREATE_NO_WINDOW: pytest started without a console of its own would flash a window for every child process.
+NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 
 GIT_CONFIG = ["-c", "user.name=ludovanta-test", "-c", "user.email=ludovanta@test.local", "-c", "init.defaultBranch=main",
               "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false"]
@@ -21,7 +23,8 @@ if IS_WINDOWS:
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    p = subprocess.run(["git", *GIT_CONFIG, *args], cwd=cwd, capture_output=True, text=True, errors="replace")
+    p = subprocess.run(["git", *GIT_CONFIG, *args], cwd=cwd, capture_output=True, text=True, errors="replace",
+                       creationflags=NO_WINDOW)
     if check and p.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed:\n{p.stdout}{p.stderr}")
     return p
@@ -30,7 +33,7 @@ def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProces
 def run_py(script: Path, *args: str, env: dict | None = None) -> tuple[int, str]:
     """Runs a script in a separate interpreter: real exit codes, no state shared with the test process."""
     p = subprocess.run([sys.executable, "-B", str(script), *args], capture_output=True, text=True, errors="replace",
-                       env={**os.environ, **(env or {})})
+                       env={**os.environ, **(env or {})}, creationflags=NO_WINDOW)
     return p.returncode, p.stdout + p.stderr
 
 

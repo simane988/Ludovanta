@@ -7,14 +7,14 @@ import sys
 
 import pytest
 
-from helpers import IS_WINDOWS, PLATFORM_DIR, write
+from helpers import IS_WINDOWS, NO_WINDOW, PLATFORM_DIR, write
 
 CLI = PLATFORM_DIR / "ludovanta.py"
 
 
 def hook(project, event, payload):
     p = subprocess.run([sys.executable, "-B", str(CLI), "--project", str(project), "hook", event],
-                       input=json.dumps(payload), capture_output=True, encoding="utf-8")
+                       input=json.dumps(payload), capture_output=True, encoding="utf-8", creationflags=NO_WINDOW)
     assert p.returncode == 0, p.stdout + p.stderr
     return p.stdout
 
@@ -88,7 +88,7 @@ def test_task_finished_in_huge_context(game, tmp_path):
 
 def test_broken_input_never_fails(game):
     p = subprocess.run([sys.executable, "-B", str(CLI), "--project", str(game), "hook", "stop"],
-                       input="not json", capture_output=True, encoding="utf-8")
+                       input="not json", capture_output=True, encoding="utf-8", creationflags=NO_WINDOW)
     assert p.returncode == 0 and p.stdout == ""
 
 
@@ -99,6 +99,6 @@ def test_hook_launcher_finds_python(game):
     if IS_WINDOWS:   # make sure the test interpreter is the first 'python' the launcher tries
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
     p = subprocess.run(["sh", str(game / ".ludovanta/hook.sh"), "session-start"], input='{"source": "clear"}',
-                       capture_output=True, encoding="utf-8", env=env)
+                       capture_output=True, encoding="utf-8", env=env, creationflags=NO_WINDOW)
     assert p.returncode == 0
     assert "LUDOVANTA PLAN BRIEF" in p.stdout, p.stdout + p.stderr

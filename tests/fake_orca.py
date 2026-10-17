@@ -56,7 +56,8 @@ def main():
         path = (STATE.parent / "workspaces" / name).as_posix()
         branch = f"orca/{name}"
         subprocess.run(["git", "-C", repo["path"], "worktree", "add", "--quiet", "-b", branch, path,
-                        arg(args, "--base-branch")], check=True, capture_output=True)
+                        arg(args, "--base-branch")], check=True, capture_output=True,
+                       creationflags=0x08000000 if os.name == "nt" else 0)
         wt = {"id": f"{repo['id']}::{path}", "path": path, "branch": f"refs/heads/{branch}",
               "comment": arg(args, "--comment")}
         state["worktrees"].append(wt)
@@ -86,7 +87,7 @@ def main():
         w = next(w for w in state["worktrees"] if w["id"] == arg(args, "--worktree")[len("id:"):])
         repo = next(r for r in state["repos"] if w["id"].startswith(r["id"] + "::"))
         subprocess.run(["git", "-C", repo["path"], "worktree", "remove", "--force", w["path"]], check=True,
-                       capture_output=True)
+                       capture_output=True, creationflags=0x08000000 if os.name == "nt" else 0)
         state["worktrees"].remove(w)
         state["agents"] = [a for a in state["agents"] if norm(a["path"]) != norm(w["path"])]
         result = {"removed": True}

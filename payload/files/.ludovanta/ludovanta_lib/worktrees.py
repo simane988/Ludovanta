@@ -22,7 +22,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from .common import EXIT_OK, IS_WINDOWS, LudovantaError, editor_open, finish, load_config, slash, spawn_detached
+from .common import (EXIT_OK, IS_WINDOWS, NO_WINDOW, LudovantaError, editor_open, finish, load_config, slash,
+                     spawn_detached)
 
 LOG_NAME = "worktree-clean.log"
 LOCK_NAME = "worktree-clean.lock"
@@ -32,7 +33,7 @@ LOCK_STALE_SECONDS = 30 * 60
 def _git(cwd, *args: str, timeout: int = 120) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, errors="replace",
-                              stdin=subprocess.DEVNULL, timeout=timeout)
+                              stdin=subprocess.DEVNULL, timeout=timeout, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         raise LudovantaError(f"git failed: {e}")
 
@@ -86,7 +87,7 @@ def stop_fsmonitor(path) -> None:
     """
     try:
         subprocess.run(["git", "-C", str(path), "fsmonitor--daemon", "stop"], capture_output=True,
-                       stdin=subprocess.DEVNULL, timeout=30)
+                       stdin=subprocess.DEVNULL, timeout=30, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         pass
 

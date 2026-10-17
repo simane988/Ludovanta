@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from helpers import IS_WINDOWS, PLATFORM_DIR, git, run_py, write
+from helpers import IS_WINDOWS, NO_WINDOW, PLATFORM_DIR, git, run_py, write
 
 CLI = PLATFORM_DIR / "ludovanta.py"
 
@@ -117,7 +117,8 @@ def test_worktree_in_use_is_kept(project):
     wt = add_worktree(project, "task-6")
     commit(wt, "Assets/D.cs")
     merge(project, "task-6")
-    terminal = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], cwd=wt, stdin=subprocess.PIPE)
+    terminal = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], cwd=wt, stdin=subprocess.PIPE,
+                                creationflags=NO_WINDOW)
     try:
         result = clean(project)
     finally:
@@ -130,7 +131,7 @@ def test_worktree_in_use_is_kept(project):
 
 def hook(project, event, payload):
     p = subprocess.run([sys.executable, "-B", str(CLI), "--project", str(project), "hook", event],
-                       input=json.dumps(payload), capture_output=True, encoding="utf-8")
+                       input=json.dumps(payload), capture_output=True, encoding="utf-8", creationflags=NO_WINDOW)
     assert p.returncode == 0, p.stdout + p.stderr
     return p.stdout
 

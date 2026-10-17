@@ -21,6 +21,9 @@ EXIT_TIMEOUT = 4
 
 IS_WINDOWS = os.name == "nt"
 IS_MAC = sys.platform == "darwin"
+# CREATE_NO_WINDOW for console tools whose output is captured: no window flashes up, also when the caller has no
+# console of its own (a background watcher, an agent's tool call).
+NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 
 
 class LudovantaError(Exception):
@@ -210,7 +213,7 @@ def new_log_path(root: Path, kind: str, keep: int = 20) -> Path:
 
 
 def run_unity(exe: Path, args: list[str], timeout_sec: int) -> dict:
-    flags = 0x08000000 if IS_WINDOWS else 0  # CREATE_NO_WINDOW
+    flags = NO_WINDOW
     start = time.monotonic()
     proc = subprocess.Popen([str(exe), *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, creationflags=flags)
@@ -231,8 +234,10 @@ def spawn_detached(root: Path, *args: str) -> None:
     """Starts 'ludovanta.py <args>' for this project in the background: it outlives the caller (a hook, a command)."""
     cli = Path(__file__).resolve().parent.parent / "ludovanta.py"
     if IS_WINDOWS:
-        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW: outlives the caller, no console window.
-        kwargs = {"creationflags": 0x00000008 | 0x00000200 | 0x08000000}
+        # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW: outlives the caller with a hidden console of its own. Not
+        # DETACHED_PROCESS: Windows then ignores CREATE_NO_WINDOW, and python.exe from a venv or the Store is a
+        # launcher whose real interpreter would open a visible console window.
+        kwargs = {"creationflags": 0x00000200 | NO_WINDOW}
     else:
         kwargs = {"start_new_session": True}
     subprocess.Popen([sys.executable, "-B", str(cli), "--project", str(root), *args], stdin=subprocess.DEVNULL,

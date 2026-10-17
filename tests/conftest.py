@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import INSTALL, IS_WINDOWS, REPO, TESTS, git, run_py, write
+from helpers import INSTALL, IS_WINDOWS, NO_WINDOW, REPO, TESTS, git, run_py, write
 
 
 @pytest.fixture(autouse=True)
@@ -163,7 +163,7 @@ def held_lockfile(project):
     lockfile = project / "Temp" / "UnityLockfile"
     write(lockfile, "")
     proc = subprocess.Popen([sys.executable, "-c", _HOLDER, str(lockfile)], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, text=True)
+                            stdout=subprocess.PIPE, text=True, creationflags=NO_WINDOW)
     assert proc.stdout.readline().strip() == "ready"
     yield lockfile
     proc.stdin.close()

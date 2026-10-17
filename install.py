@@ -83,7 +83,8 @@ def full(root: Path, rel: str) -> Path:
 
 def git(*args: str) -> tuple[int, str]:
     try:
-        p = subprocess.run(["git", *args], capture_output=True, text=True, errors="replace")
+        p = subprocess.run(["git", *args], capture_output=True, text=True, errors="replace",
+                           creationflags=0x08000000 if sys.platform == "win32" else 0)   # CREATE_NO_WINDOW
     except OSError as e:
         return 127, str(e)
     return p.returncode, p.stdout.strip()

@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 from .assignment import AGENTS, Agents, validate_weights
-from .common import (EXIT_INFRA, EXIT_OK, IS_WINDOWS, LudovantaError, editor_open, finish, load_config, read_text,
-                     resolve_unity, unity_version)
+from .common import (EXIT_INFRA, EXIT_OK, IS_WINDOWS, NO_WINDOW, LudovantaError, editor_open, finish,
+                     load_config, read_text, resolve_unity, unity_version)
 
 ORDER = {"FAIL": 0, "warn": 1, "info": 2, "ok": 3}
 TAG_RX = re.compile(r"refs/tags/v(\d+)\.(\d+)\.(\d+)$")
@@ -27,7 +27,7 @@ TAG_RX = re.compile(r"refs/tags/v(\d+)\.(\d+)\.(\d+)$")
 def _run(*args: str, cwd: Path | None = None, timeout: int = 20) -> tuple[int, str]:
     try:
         p = subprocess.run(list(args), cwd=cwd, capture_output=True, text=True, errors="replace",
-                           stdin=subprocess.DEVNULL, timeout=timeout)
+                           stdin=subprocess.DEVNULL, timeout=timeout, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         return -1, str(e)
     return p.returncode, (p.stdout + p.stderr).strip()

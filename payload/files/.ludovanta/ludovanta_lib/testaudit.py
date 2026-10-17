@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from . import parsers
-from .common import EXIT_OK, finish, read_text, relpath
+from .common import EXIT_OK, NO_WINDOW, finish, read_text, relpath
 
 TEST_ATTR_RX = re.compile(r"\[\s*(?:NUnit\.Framework\.)?(Test|UnityTest|TestCase|TestCaseSource)\b")
 SLOW_SECONDS = {"EditMode": 0.5, "PlayMode": 10.0}
@@ -181,7 +181,7 @@ def _churn(root: Path, test_files: set[str], max_items: int) -> list[dict]:
     try:
         p = subprocess.run(["git", "-C", str(root), "log", f"--since={CHURN_DAYS}.days", "--format=%x00",
                             "--name-only", "--", "Assets"], capture_output=True, text=True, errors="replace",
-                           timeout=60)
+                           timeout=60, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return []
     if p.returncode != 0:

@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from helpers import PLATFORM_DIR, read, write
+from helpers import NO_WINDOW, PLATFORM_DIR, read, write
 
 CLI = PLATFORM_DIR / "ludovanta.py"
 
@@ -15,7 +15,8 @@ def cli(project, *args):
     """Decodes output as UTF-8 explicitly: plan titles are often not ASCII."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONIOENCODING"}
     p = subprocess.run([sys.executable, "-B", str(CLI), "--project", str(project), "plan", *args],
-                       capture_output=True, encoding="utf-8", errors="strict", env=env)
+                       capture_output=True, encoding="utf-8", errors="strict", env=env,
+                       creationflags=NO_WINDOW)
     return p.returncode, p.stdout + p.stderr
 
 

@@ -13,7 +13,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .codex import find_codex
-from .common import LudovantaError, load_config, read_text
+from .common import NO_WINDOW, LudovantaError, load_config, read_text
 from .plan import SIZES
 
 AGENTS = ("claude", "codex")
@@ -40,7 +40,7 @@ def validate_weights(cfg: dict) -> dict | None:
 def _run(exe: str, root: Path, *args: str) -> tuple[int, str]:
     try:
         p = subprocess.run([exe, *args], cwd=root, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", stdin=subprocess.DEVNULL, timeout=30)
+                           errors="replace", stdin=subprocess.DEVNULL, timeout=30, creationflags=NO_WINDOW)
         return p.returncode, (p.stdout if p.returncode == 0 else p.stdout + p.stderr).strip()
     except (OSError, subprocess.SubprocessError) as e:
         return -1, str(e)

@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from helpers import PLATFORM_DIR, git, read, write
+from helpers import NO_WINDOW, PLATFORM_DIR, git, read, write
 
 CLI = PLATFORM_DIR / "ludovanta.py"
 LOG = "docs/feedback-log.md"
@@ -17,7 +17,8 @@ def cli(project, *args):
     """Decodes output as UTF-8 explicitly: entries are usually in the user's language."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONIOENCODING"}
     p = subprocess.run([sys.executable, "-B", str(CLI), "--project", str(project), "feedback", *args],
-                       capture_output=True, encoding="utf-8", errors="strict", env=env)
+                       capture_output=True, encoding="utf-8", errors="strict", env=env,
+                       creationflags=NO_WINDOW)
     return p.returncode, p.stdout + p.stderr
 
 

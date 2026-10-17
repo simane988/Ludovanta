@@ -49,8 +49,8 @@ from pathlib import Path
 
 from . import plan as plan_mod
 from .assignment import Agents, pick, validate_weights
-from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, LudovantaError, finish, load_config, relpath, slash,
-                     spawn_detached)
+from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, NO_WINDOW, LudovantaError, finish, load_config, relpath,
+                     slash, spawn_detached)
 
 AGENTS = ("claude", "codex")
 FINISHED = ("review", "done")
@@ -80,7 +80,7 @@ def orca(exe: str, *args: str, timeout: int = 180) -> dict:
     """Runs 'orca <args> --json' and returns its 'result'; raises LudovantaError with Orca's message on failure."""
     try:
         p = subprocess.run([exe, *args, "--json"], capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           stdin=subprocess.DEVNULL, timeout=timeout)
+                           stdin=subprocess.DEVNULL, timeout=timeout, creationflags=NO_WINDOW)
     except subprocess.TimeoutExpired:
         raise LudovantaError(f"orca {' '.join(args[:2])} did not answer in {timeout} s")
     except OSError as e:
@@ -118,7 +118,7 @@ def available(root: Path) -> tuple[str | None, str]:
 def _git(cwd, *args: str, timeout: int = 300) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, errors="replace",
-                              stdin=subprocess.DEVNULL, timeout=timeout)
+                              stdin=subprocess.DEVNULL, timeout=timeout, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         raise LudovantaError(f"git failed: {e}")
 
@@ -514,7 +514,8 @@ def _commit(top, paths: list[str] | None, message: str) -> str | None:
         spec = "\0".join(paths) + "\0"
         for args in (["add", "-A"], ["commit", "--quiet", "-m", message]):
             p = subprocess.run(["git", "-C", str(top), *args, "--pathspec-from-file=-", "--pathspec-file-nul"],
-                               input=spec, capture_output=True, text=True, encoding="utf-8", errors="replace")
+                               input=spec, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               creationflags=NO_WINDOW)
             if p.returncode != 0:
                 raise LudovantaError(f"git {args[0]} failed: {(p.stderr or p.stdout).strip()}")
     return _git_ok(top, "rev-parse", "--short", "HEAD")

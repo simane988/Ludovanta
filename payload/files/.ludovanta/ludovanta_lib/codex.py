@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import plan as plan_mod
-from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, EXIT_TIMEOUT, IS_WINDOWS, LudovantaError, finish, load_config,
+from .common import (EXIT_INFRA, EXIT_OK, EXIT_PROBLEMS, EXIT_TIMEOUT, NO_WINDOW, LudovantaError, finish, load_config,
                      relpath, write_lf)
 
 SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
@@ -58,7 +58,7 @@ def _run(root: Path, exe: str, prompt_file: Path, result: Path, log: Path, timeo
     start = time.monotonic()
     with open(log, "wb") as out:
         proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                creationflags=0x08000000 if IS_WINDOWS else 0)
+                                creationflags=NO_WINDOW)
         try:
             code, timed_out = proc.wait(timeout=timeout), False
         except subprocess.TimeoutExpired:
@@ -78,7 +78,7 @@ def _tail(path: Path, count: int = 15) -> list[str]:
 def _changed_files(root: Path) -> list[str]:
     try:
         p = subprocess.run(["git", "-C", str(root), "status", "--porcelain"], capture_output=True, text=True,
-                           errors="replace", timeout=60)
+                           errors="replace", timeout=60, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return []
     return [line for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else []
