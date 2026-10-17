@@ -173,15 +173,24 @@ Orchestrator, for each task (`plan next`, or the one the user named):
 
 1. Pick where the executor runs. `status` says whether Orca is running.
    - **Orca running** (the usual case): `worker start T-xxx [--agent claude|codex]` (the card's `agent`;
-     `any` -> claude). It commits the card as in-progress and starts the agent in Orca, so the user
-     sees every executor there. The card's `editor` field picks the lane:
-     - `editor: true`: a new agent terminal in the main working copy, where the Editor and Unity MCP
+     otherwise `claude`; `--agent` overrides the card). `WORKER_STARTED` means it committed the card
+     as in-progress, recorded the agent and started it in Orca, so the user sees every executor there.
+     The card's `editor` field picks the lane:
+     - `editor: true` (default): a new agent terminal in the main working copy, where the Editor and Unity MCP
        are. One such task at a time (`EDITOR_BUSY` otherwise). Nothing to merge.
      - `editor: false`: an Orca worktree from the current branch, HEADLESS, without Unity MCP. As many
        as are ready and touch different files.
      Commit the plan before starting (executors start from the last commit). Start the ready Editor
      task and every ready `editor: false` task, then `worker wait`.
-   - **No Orca**: `codex` -> `ludovanta.py codex run T-xxx` (skill `ludovanta-codex`); `claude` or
+     `NOT_STARTABLE` lists every reason: missing acceptance criteria, status outside `todo` or
+     `in-progress`, dependencies outside `review` or `done`, uncommitted plan, detached HEAD, or a
+     linked worktree. Resolve the listed reasons in the main working copy before retrying.
+     `WORKER_EXISTS`: inspect the existing executor with `worker list`; send it instructions or finish
+     it instead of starting a duplicate. `EDITOR_BUSY`: finish the named Editor executor first;
+     ready worktree tasks can still start. `AGENT_NOT_READY`: inspect the terminal for login or trust
+     prompts; once ready, give it the task by hand with `worker send` as the command explains.
+   - **No Orca** (`ORCA_UNAVAILABLE`, plan unchanged): `codex` -> `ludovanta.py codex run T-xxx`
+     (skill `ludovanta-codex`); `claude` or
      `any` -> a subagent (Claude Code: the Agent tool, general-purpose) with only this prompt: "You
      are the executor of Ludovanta task T-xxx in this Unity project. Run `python3
      .ludovanta/ludovanta.py plan brief T-xxx` (on Windows `python` or `py -3`) and do the task by
@@ -191,36 +200,54 @@ Orchestrator, for each task (`plan next`, or the one the user named):
    the dependencies' handoffs and the rules.
 2. Without Orca: one executor at a time while the Unity Editor is open (LIVE), they share the Editor
    and its compilation.
-3. `worker wait` returns when an executor needs you (at most 9 minutes; run it again while
-   `WORKERS_RUNNING`), with its final message as the report:
-   - **finished** (card in review): verify (step 4), then `worker finish T-xxx`. Executors do not
-     commit (Codex's sandbox keeps `.git` read-only), so it commits for them. A worktree task: it
-     commits everything in the worktree, merges the branch into the current branch and removes the
-     worktree and the branch through Orca. An Editor task: it commits the files changed since the
-     start (files that were already uncommitted then stay out and are listed) and closes the agent
+3. `worker wait [T-xxx ...]` returns when at least one selected executor needs you (`WORKERS_SETTLED`;
+   default: all executors), or after at most 9 minutes (`WORKERS_RUNNING`: run it again), with the
+   last 40 lines of each settled executor's final message as its report:
+   - **running**: the agent works, whatever the card says, or it is within 90 seconds of starting
+     or receiving an answer and the card is not `review`, `done` or `blocked`. Let it finish its turn.
+   - **finished** (idle agent, card in `review` or `done`): verify (step 4), then `worker finish T-xxx`.
+     Executors do not commit (Codex's sandbox keeps `.git` read-only), so it commits for them. A worktree task: it
+     commits everything in the worktree, merges with `--no-ff` into the branch it started from,
+     removes the worktree through Orca and deletes the branch. `WORKER_FINISHED` confirms completion.
+     `WRONG_BRANCH`: check out that starting branch and retry. `NOTHING_TO_MERGE`: no commits remain
+     beyond the base; inspect the task and remove its worktree in Orca if it was dropped.
+     An Editor task: it requires `review` or `done` (`NOT_FINISHED`: let it finish or resolve its card
+     before retrying), and commits the files changed since the start (files that were already
+     uncommitted then stay out and are listed) and closes the agent
      terminal; then the next Editor task can start. No merges while an Editor task works (`EDITOR_BUSY`): the merge would
      change files under its Editor. `MERGE_CONFLICT`: nothing is merged; ask the executor to merge the
      current branch into its own and resolve the conflicts (`worker send`), then finish again.
    - **stopped** or **blocked** (the agent is idle, the card is not in review): a question, a failure or
      a STOP. Answer what you can, ask the user the rest, and pass the answer with
-     `worker send T-xxx "..."`.
+     `worker send T-xxx "..."`. `blocked` follows the card even during the start grace period;
+     `stopped` means it is past that period and still unfinished. `WORKER_SENT` confirms the answer
+     was typed as one line; the command finds the terminal again if its handle changed.
+   - **gone**: the folder no longer exists or Orca no longer lists the worktree. Inspect it in Orca
+     before deciding how to recover the task.
+   Finished worktrees are marked in review and unread on the Orca board.
    You do not have to stay in `worker wait` until every executor is done. When you run the orchestrator
-   in an Orca terminal, the worker commands start a watcher in the background. When an executor
-   finishes, stops or is blocked, and you are idle, the watcher types a line into your terminal:
+   in an Orca terminal, the worker commands keep a watcher running in the background. When an executor
+   finishes, stops, is blocked or is gone, and you are idle, the watcher types a line into your terminal:
    "Ludovanta watcher: executor T-xxx finished ... Run ludovanta.py worker wait". Treat that line as
    your cue rather than as the user's words: run `worker wait` and handle what it shows. So you can
    handle one executor, report to the user and end your turn while the others work. Each state is
-   announced once, and what `worker wait` or `worker list` already showed is not announced. When the
-   orchestrator is not in an Orca terminal, the command says so: then nothing wakes you, so keep
-   running `worker wait` until no executors are left.
+   announced once, and what `worker wait` or `worker list` already showed is not announced. The watcher
+   waits until your terminal has been quiet for a minute (the user may be typing), at most 10 minutes;
+   its reasons are in `Logs/ludovanta/worker-watch.log`. When the orchestrator is not in an Orca
+   terminal, the command says so: then nothing wakes you, so keep running `worker wait` until no
+   executors are left.
    Several executors can wait for the user at the same time: the first asked a question, and before
    the user answered, a second one came back with its own. `worker wait` and `worker list` end with a
-   `WAITING FOR THE USER` block that holds every open item, by task: a question from a stopped executor,
-   and a task in review waiting for the user to accept it. The block includes items you have already
-   asked about. Every reply to the user ends with this list in the user's language, numbered as in the
+   `WAITING FOR THE USER` block when anything is open, also with `NO_WORKERS`: a question or problem
+   from every stopped or blocked executor, and each task in review that no executor holds, waiting
+   for the user to accept it. With nothing open there is no block. Question quotes use the whole
+   final message: paragraphs containing `?`, up to 8 lines, or the last paragraph without a question.
+   The block includes items you have already asked about. Every reply to the user ends with this list
+   in the user's language, numbered as in the
    block, each item headed by its task (`1. T-001 Fare meter: ...`), so the user can answer
    "1: yes, 2: the yellow one". Do not drop an earlier question because a newer one arrived: in the
-   conversation it is above, out of sight. Pass each answer to its own task with `worker send`. An
+   conversation it is above, out of sight. Answer from the plan and design what you can; ask the user
+   only the rest. Pass each numbered answer to its own executor with `worker send`, and to no other. An
    answered question and an accepted task drop out of the block by themselves.
    `worker list` shows every executor without waiting. Worktrees that are merged but still exist
    (made by hand, or a finish that could not remove them) are removed by `worktree clean`; the Claude

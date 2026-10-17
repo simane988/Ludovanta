@@ -427,3 +427,230 @@ def test_watcher_types_anyway_after_waiting_too_long(in_orca, fake_orca_env):
     write(game / "Logs/ludovanta/worker-watch-deferred.txt", str(time.time() - 700))
     assert watch(game) == ["T-001"] and me(fake_orca_env)["sent"]
     assert not (game / "Logs/ludovanta/worker-watch-deferred.txt").exists()
+
+
+@pytest.mark.parametrize("command", ["wait", "list"])
+def test_no_workers_still_lists_tasks_waiting_for_acceptance(game, command):
+    card(game, "T-004", status="review")
+    code, out = cli(game, "worker", command)
+    assert code == 0 and out["status"] == "NO_WORKERS" and out["workers"] == []
+    assert [(i["task"], i["kind"]) for i in out["waitingForUser"]] == [("T-004", "review")]
+    code, text = run_py(CLI, "--project", str(game), "worker", command)
+    assert code == 0 and "NO_WORKERS" in text
+    assert "1. T-004 Fare meter T-004" in text[text.index("WAITING FOR THE USER"):]
+    card(game, "T-004", status="done")
+    _, out = cli(game, "worker", command)
+    assert out["waitingForUser"] == [], "an accepted task drops out"
+
+
+def test_question_comes_from_the_whole_final_message(game, fake_orca_env):
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    message = ["Should the fare include tips?", ""] + [f"Report line {n}" for n in range(58)]
+    set_agent(fake_orca_env, state="waiting", lastAssistantMessage="\n".join(message))
+    _, out = cli(game, "worker", "list")
+    assert out["workers"][0]["report"] == message[-40:]
+    assert out["waitingForUser"][0]["text"] == [message[0]]
+    code, text = run_py(CLI, "--project", str(game), "worker", "list")
+    report, block = text.split("WAITING FOR THE USER", 1)
+    assert code == 0 and message[0] not in report and message[0] in block
+
+
+@pytest.fixture
+def orca_module(monkeypatch):
+    monkeypatch.syspath_prepend(str(PLATFORM_DIR))
+    from ludovanta_lib import orca
+    return orca
+
+
+@pytest.mark.parametrize("command", ["wait", "list"])
+@pytest.mark.parametrize("subset", [False, True])
+@pytest.mark.parametrize("stale", [False, True])
+def test_settled_workers_keep_the_watcher_running(in_orca, fake_orca_env, orca_module, monkeypatch,
+                                                 capsys, command, subset, stale):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    if subset:
+        cli(game, "worker", "start", "T-003")   # unselected executor still working
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting",
+              lastAssistantMessage="Which car?")
+    lock = game / "Logs/ludovanta/worker-watch.lock"
+    if stale:
+        write(lock, "dead watcher")
+        os.utime(lock, (time.time() - 400, time.time() - 400))
+    spawned = []
+    monkeypatch.delenv("LUDOVANTA_NO_WATCHER")
+    monkeypatch.setattr(orca_module, "spawn_detached", lambda *args: spawned.append(args))
+    tasks = ["T-001"] if command == "wait" else []
+    assert orca_module.wait(game, tasks, 0, 0, False) == 0
+    text = capsys.readouterr().out
+    assert spawned == [(game, "worker", "watch")]
+    before, block = text.split("WAITING FOR THE USER", 1)
+    assert "The watcher types" in before and "The watcher types" not in block
+    assert text.rstrip().endswith("Which car?")
+    # A live watcher is reused rather than spawned a second time.
+    write(lock, "live watcher")
+    spawned.clear()
+    assert orca_module.wait(game, tasks, 0, 0, False) == 0
+    assert spawned == []
+
+
+@pytest.mark.parametrize("case", ["detached HEAD", "linked worktree"])
+def test_start_requires_the_main_working_copy_on_a_branch(game, fake_orca_env, case):
+    root = game
+    if case == "detached HEAD":
+        git(game, "checkout", "--quiet", "--detach")
+        reason = "detached HEAD"
+    else:
+        root = game.parent / "linked"
+        git(game, "worktree", "add", "--quiet", "-b", "linked", str(root))
+        reason = "main working copy"
+    head = git(root, "rev-parse", "HEAD").stdout
+    code, out = cli(root, "worker", "start", "T-001")
+    assert code == 1 and out["status"] == "NOT_STARTABLE"
+    assert any(reason in p for p in out["problems"])
+    assert "status: todo" in read(root / "plan/tasks/T-001.md")
+    assert git(root, "rev-parse", "HEAD").stdout == head
+    assert not orca_state(fake_orca_env)["worktrees"]
+
+
+@pytest.mark.parametrize("case", ["folder removed", "not listed"])
+def test_gone_executor(game, fake_orca_env, case):
+    _, started = cli(game, "worker", "start", "T-001")
+    state = orca_state(fake_orca_env)
+    if case == "folder removed":
+        git(game, "worktree", "remove", "--force", started["path"])
+    else:
+        state["worktrees"] = []
+        state["agents"] = []
+        fake_orca_env.write_text(json.dumps(state), encoding="utf-8")
+        assert os.path.isdir(started["path"])
+    _, out = cli(game, "worker", "list")
+    assert out["status"] == "WORKERS_SETTLED" and out["workers"][0]["state"] == "gone"
+
+
+@pytest.mark.parametrize("case", ["wrong branch", "nothing to merge"])
+def test_finish_refuses_the_wrong_branch_or_an_empty_executor(game, fake_orca_env, case):
+    _, started = cli(game, "worker", "start", "T-001")
+    if case == "wrong branch":
+        git(game, "checkout", "--quiet", "-b", "other")
+    head = git(game, "rev-parse", "HEAD").stdout
+    code, out = cli(game, "worker", "finish", "T-001")
+    assert code == 1 and out["status"] == ("WRONG_BRANCH" if case == "wrong branch" else "NOTHING_TO_MERGE")
+    assert git(game, "rev-parse", "HEAD").stdout == head
+    assert os.path.isdir(started["path"]) and worker_state(game)
+    assert not any(c[:2] == ["worktree", "rm"] for c in orca_state(fake_orca_env)["calls"])
+
+
+def test_start_uses_the_agent_on_the_card(game, fake_orca_env):
+    card(game, "T-001", agent="codex")
+    git(game, "commit", "--quiet", "-am", "choose codex")
+    code, out = cli(game, "worker", "start", "T-001")
+    assert code == 0 and out["agent"] == "codex"
+    assert agents(fake_orca_env)[0]["agentType"] == "codex"
+
+
+@pytest.mark.parametrize("tid", ["T-001", "T-003"])
+def test_send_finds_a_terminal_with_a_new_handle(game, fake_orca_env, tid):
+    _, started = cli(game, "worker", "start", tid)
+    stop_grace(game, tid)
+    set_agent(fake_orca_env, state="waiting", handle=started["terminal"])
+    state = orca_state(fake_orca_env)
+    state["agents"][0]["handle"] = "new_handle"
+    fake_orca_env.write_text(json.dumps(state), encoding="utf-8")
+    code, out = cli(game, "worker", "send", tid, "The yellow car")
+    assert code == 0 and out["terminal"] == "new_handle"
+    assert agents(fake_orca_env)[0]["sent"][-1] == "The yellow car"
+    _, out = cli(game, "worker", "list")
+    assert out["workers"][0]["state"] == "running"
+
+
+@pytest.mark.parametrize("by_pane", [False, True])
+def test_executor_commands_do_not_replace_the_orchestrator(in_orca, fake_orca_env, monkeypatch, by_pane):
+    game = in_orca
+    _, started = cli(game, "worker", "start", "T-003")
+    path = game / "Logs/ludovanta/workers/orchestrator.json"
+    before = read(path)
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "new_handle" if by_pane else started["terminal"])
+    monkeypatch.setenv("ORCA_PANE_KEY", started["pane"] if by_pane else "")
+    cli(game, "worker", "list")
+    assert read(path) == before
+
+
+def test_outside_orca_says_nothing_will_wake_the_orchestrator(game):
+    code, out = run_py(CLI, "--project", str(game), "worker", "start", "T-001")
+    assert code == 0 and "This is not an Orca terminal" in out and "keep running 'worker wait'" in out
+    assert not (game / "Logs/ludovanta/workers/orchestrator.json").exists()
+
+
+def test_watcher_announces_two_executors_in_one_line(in_orca, fake_orca_env):
+    game = in_orca
+    for tid in ("T-001", "T-003"):
+        _, started = cli(game, "worker", "start", tid)
+        stop_grace(game, tid)
+        set_agent(fake_orca_env, handle=started["terminal"], state="waiting", lastAssistantMessage="Which car?")
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    assert watch(game) == ["T-001", "T-003"]
+    sent = me(fake_orca_env)["sent"]
+    assert len(sent) == 1 and "T-001 stopped" in sent[0] and "T-003 stopped" in sent[0]
+    assert "\n" not in sent[0]
+
+
+def test_watcher_counts_other_executors_still_working(in_orca, fake_orca_env):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    cli(game, "worker", "start", "T-003")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting", lastAssistantMessage="Which car?")
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    assert watch(game) == ["T-001"]
+    assert "1 other executor(s) keep working." in me(fake_orca_env)["sent"][0]
+
+
+def test_failed_watcher_round_is_logged_and_the_next_round_runs(in_orca, fake_orca_env, orca_module, monkeypatch):
+    game = in_orca
+    cli(game, "worker", "start", "T-001")
+    stop_grace(game, "T-001")
+    set_agent(fake_orca_env, handle="term_t-001-fare-meter-t-001", state="waiting", lastAssistantMessage="Which car?")
+    set_agent(fake_orca_env, handle="term_me", state="idle")
+    original = orca_module.orca
+    attempts = []
+
+    def fail_once(exe, *args, **kwargs):
+        if args[:2] == ("worktree", "ps"):
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise orca_module.LudovantaError("test Orca round failure")
+        return original(exe, *args, **kwargs)
+
+    monkeypatch.setattr(orca_module, "orca", fail_once)
+    assert orca_module.watch(game, 2, 0, False) == 0
+    assert len(attempts) == 2 and len(me(fake_orca_env)["sent"]) == 1
+    log = read(game / "Logs/ludovanta/worker-watch.log")
+    assert "round failed: LudovantaError: test Orca round failure" in log
+    assert "woke the orchestrator" in log and "exited: 2 round(s) done" in log
+
+
+@pytest.mark.parametrize("with_executor", [False, True])
+def test_nothing_open_has_no_waiting_block(game, with_executor):
+    if with_executor:
+        cli(game, "worker", "start", "T-001")
+    for command in ("wait", "list"):
+        args = ["--timeout", "0"] if command == "wait" else []
+        code, text = run_py(CLI, "--project", str(game), "worker", command, *args)
+        assert code == 0 and "WAITING FOR THE USER" not in text
+
+
+def test_blocked_executor_is_in_the_waiting_block(game, fake_orca_env):
+    _, started = cli(game, "worker", "start", "T-001")
+    path = game.parent / "orca/workspaces" / os.path.basename(started["path"])
+    card(path, "T-001", status="blocked")
+    set_agent(fake_orca_env, state="waiting", lastAssistantMessage="Which car should I use?")
+    _, out = cli(game, "worker", "list")
+    assert out["workers"][0]["state"] == "blocked", "blocked bypasses the start grace period"
+    assert out["waitingForUser"][0]["task"] == "T-001" and out["waitingForUser"][0]["kind"] == "question"
+    code, text = run_py(CLI, "--project", str(game), "worker", "list")
+    assert code == 0 and "BLOCKED" in text
+    block = text[text.index("WAITING FOR THE USER"):]
+    assert "1. T-001 Fare meter T-001" in block and "Which car should I use?" in block

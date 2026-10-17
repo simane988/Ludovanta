@@ -656,13 +656,16 @@ def _agent(state: dict, row: dict | None) -> dict | None:
     return next((a for a in agents if a.get("agentType") == state["agent"]), agents[0] if agents else None)
 
 
-def _report(state: dict, row: dict | None) -> list[str]:
+def _final_message(state: dict, row: dict | None) -> list[str]:
     agent = _agent(state, row) or {}
     message = agent.get("lastAssistantMessage")
     if message and not agent.get("lastAssistantMessageIsToolOutput"):
-        lines = message.strip().splitlines()
-        return lines[-REPORT_LINES:] if len(lines) > REPORT_LINES else lines
+        return message.strip().splitlines()
     return []
+
+
+def _report(state: dict, row: dict | None) -> list[str]:
+    return _final_message(state, row)[-REPORT_LINES:]
 
 
 def _work_paths(state: dict) -> list[str]:
@@ -722,7 +725,9 @@ def wait(root: Path, tasks: list[str], timeout: int, poll: float, as_json: bool)
         return finish("ORCA_UNAVAILABLE", EXIT_INFRA, [f"ORCA_UNAVAILABLE: {why}."], {"reason": why}, as_json)
     states = [_load(root, t) for t in tasks] if tasks else _all(root)
     if not states:
-        return finish("NO_WORKERS", EXIT_OK, ["NO_WORKERS: no executors in Orca ('worker start T-xxx')."], {}, as_json)
+        waiting = _waiting_for_user(root, [])
+        lines = ["NO_WORKERS: no executors in Orca ('worker start T-xxx')."] + _waiting_lines(waiting)
+        return finish("NO_WORKERS", EXIT_OK, lines, {"workers": [], "waitingForUser": waiting}, as_json)
     _remember_orchestrator(root)
     deadline = time.monotonic() + max(0, timeout)
     while True:
@@ -747,14 +752,13 @@ def wait(root: Path, tasks: list[str], timeout: int, poll: float, as_json: bool)
     everyone = results + [(s, verdict(root, s, rows.get(_norm(s["path"]))), rows.get(_norm(s["path"])))
                           for s in _all(root) if s["task"] not in shown]
     waiting = _waiting_for_user(root, everyone)
-    lines += _waiting_lines(waiting)
     status = "WORKERS_SETTLED" if settled else "WORKERS_RUNNING"
     lines.insert(0, f"{status}: {len(settled)} of {len(results)} executor(s) need you"
                  + ("" if settled or timeout <= 0 else f"; nothing settled in {timeout} s, run 'worker wait' again"))
-    if len(settled) < len(results):
-        watcher = ensure_watcher(root)
-        if watcher:
-            lines.append(watcher)
+    watcher = ensure_watcher(root)
+    if watcher:
+        lines.append(watcher)
+    lines += _waiting_lines(waiting)
     data = {"workers": [{**s, **v, "report": _report(s, row)} for s, v, row in results], "waitingForUser": waiting}
     return finish(status, EXIT_OK, lines, data, as_json)
 
@@ -777,7 +781,8 @@ def _question(report: list[str]) -> list[str]:
 def _waiting_for_user(root: Path, results: list) -> list[dict]:
     """Everything the user has to answer or accept, including what was shown before and is still open: executors
     stopped with a question, and tasks in review that no executor holds any more."""
-    items = [{"task": s["task"], "title": s.get("title", ""), "kind": "question", "text": _question(_report(s, row))}
+    items = [{"task": s["task"], "title": s.get("title", ""), "kind": "question",
+              "text": _question(_final_message(s, row))}
              for s, v, row in results if v["state"] in ("stopped", "blocked")]
     held = {s["task"] for s, _, _ in results}
     items += [{"task": t["id"], "title": t["title"], "kind": "review", "text": []}
